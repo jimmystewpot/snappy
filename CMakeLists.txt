@@ -313,6 +313,7 @@ add_library(snappy "")
 target_sources(snappy
   PRIVATE
     "snappy-internal.h"
+    "snappy-isadetection.h"
     "snappy-stubs-internal.h"
     "snappy-c.cc"
     "snappy-sinksource.cc"
