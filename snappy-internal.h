@@ -36,7 +36,35 @@
 #include "snappy-isadetection.h"
 #include "snappy-stubs-internal.h"
 
-#if SNAPPY_HAVE_SSSE3
+#if SNAPPY_IS_X86_64
+#undef SNAPPY_HAVE_NEON
+#define SNAPPY_HAVE_NEON 0
+#undef SNAPPY_HAVE_NEON_CRC32
+#define SNAPPY_HAVE_NEON_CRC32 0
+#elif SNAPPY_IS_AARCH64
+#undef SNAPPY_HAVE_SSSE3
+#define SNAPPY_HAVE_SSSE3 0
+#undef SNAPPY_HAVE_X86_CRC32
+#define SNAPPY_HAVE_X86_CRC32 0
+#undef SNAPPY_HAVE_BMI2
+#define SNAPPY_HAVE_BMI2 0
+#endif
+
+#if !defined(SNAPPY_ATTRIBUTE_NOINLINE)
+#if defined(__GNUC__) || defined(__clang__)
+#define SNAPPY_ATTRIBUTE_NOINLINE __attribute__((noinline))
+#elif defined(_MSC_VER)
+#define SNAPPY_ATTRIBUTE_NOINLINE __declspec(noinline)
+#else
+#define SNAPPY_ATTRIBUTE_NOINLINE
+#endif
+#endif
+
+#if SNAPPY_IS_X86_64
+// Please do not replace with <x86intrin.h> or with headers that assume more
+// advanced SSE versions without checking with all the OWNERS.
+#include <immintrin.h>
+#elif SNAPPY_HAVE_SSSE3
 // Please do not replace with <x86intrin.h> or with headers that assume more
 // advanced SSE versions without checking with all the OWNERS.
 #include <emmintrin.h>
@@ -60,7 +88,7 @@
 #define VSE8_V_U8M2 __riscv_vse8_v_u8m2
 #endif
 
-#if SNAPPY_HAVE_SSSE3 || SNAPPY_HAVE_NEON
+#if SNAPPY_IS_X86_64 || SNAPPY_HAVE_NEON || SNAPPY_HAVE_SSSE3
 #define SNAPPY_HAVE_VECTOR_BYTE_SHUFFLE 1
 #else
 #define SNAPPY_HAVE_VECTOR_BYTE_SHUFFLE 0
@@ -70,7 +98,7 @@ namespace snappy {
 namespace internal {
 
 #if SNAPPY_HAVE_VECTOR_BYTE_SHUFFLE
-#if SNAPPY_HAVE_SSSE3
+#if SNAPPY_IS_X86_64 || SNAPPY_HAVE_SSSE3
 using V128 = __m128i;
 #elif SNAPPY_HAVE_NEON
 using V128 = uint8x16_t;
@@ -92,7 +120,22 @@ inline V128 V128_Shuffle(V128 input, V128 shuffle_mask);
 // Constructs V128 with 16 chars |c|.
 inline V128 V128_DupChar(char c);
 
-#if SNAPPY_HAVE_SSSE3
+#if SNAPPY_IS_X86_64
+SNAPPY_TARGET_REGION("ssse3")
+inline V128 V128_Load(const V128* src) { return _mm_load_si128(src); }
+
+inline V128 V128_LoadU(const V128* src) { return _mm_loadu_si128(src); }
+
+inline void V128_StoreU(V128* dst, V128 val) { _mm_storeu_si128(dst, val); }
+
+inline V128 V128_Shuffle(V128 input, V128 shuffle_mask) {
+  return _mm_shuffle_epi8(input, shuffle_mask);
+}
+
+inline V128 V128_DupChar(char c) { return _mm_set1_epi8(c); }
+SNAPPY_UNTARGET_REGION
+
+#elif SNAPPY_HAVE_SSSE3
 inline V128 V128_Load(const V128* src) { return _mm_load_si128(src); }
 
 inline V128 V128_LoadU(const V128* src) { return _mm_loadu_si128(src); }
