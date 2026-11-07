@@ -71,7 +71,7 @@
 #include <tmmintrin.h>
 #endif
 
-#if SNAPPY_HAVE_NEON
+#if SNAPPY_IS_AARCH64 || SNAPPY_HAVE_NEON
 #include <arm_neon.h>
 #endif
 
@@ -88,7 +88,8 @@
 #define VSE8_V_U8M2 __riscv_vse8_v_u8m2
 #endif
 
-#if SNAPPY_IS_X86_64 || SNAPPY_HAVE_NEON || SNAPPY_HAVE_SSSE3
+#if SNAPPY_IS_X86_64 || SNAPPY_IS_AARCH64 || SNAPPY_HAVE_NEON || \
+    SNAPPY_HAVE_SSSE3
 #define SNAPPY_HAVE_VECTOR_BYTE_SHUFFLE 1
 #else
 #define SNAPPY_HAVE_VECTOR_BYTE_SHUFFLE 0
@@ -100,7 +101,7 @@ namespace internal {
 #if SNAPPY_HAVE_VECTOR_BYTE_SHUFFLE
 #if SNAPPY_IS_X86_64 || SNAPPY_HAVE_SSSE3
 using V128 = __m128i;
-#elif SNAPPY_HAVE_NEON
+#elif SNAPPY_IS_AARCH64 || SNAPPY_HAVE_NEON
 using V128 = uint8x16_t;
 #endif
 
@@ -148,7 +149,7 @@ inline V128 V128_Shuffle(V128 input, V128 shuffle_mask) {
 
 inline V128 V128_DupChar(char c) { return _mm_set1_epi8(c); }
 
-#elif SNAPPY_HAVE_NEON
+#elif SNAPPY_IS_AARCH64 || SNAPPY_HAVE_NEON
 inline V128 V128_Load(const V128* src) {
   return vld1q_u8(reinterpret_cast<const uint8_t*>(src));
 }
