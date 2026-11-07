@@ -26,23 +26,23 @@
 // (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 // OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
+#include "snappy.h"
+
 #include <algorithm>
 #include <cinttypes>
-#include <cstdint>
 #include <cmath>
+#include <cstdint>
 #include <cstdlib>
 #include <random>
 #include <string>
 #include <utility>
 #include <vector>
 
-#include "snappy-test.h"
-
 #include "gtest/gtest.h"
-
 #include "snappy-internal.h"
+#include "snappy-isadetection.h"
 #include "snappy-sinksource.h"
-#include "snappy.h"
+#include "snappy-test.h"
 #include "snappy_test_data.h"
 
 SNAPPY_FLAG(bool, snappy_dump_decompression_table, false,
@@ -68,8 +68,8 @@ class DataEndingAtUnreadablePage {
     // Round up space for string to a multiple of page_size.
     size_t space_for_string = (size + page_size - 1) & ~(page_size - 1);
     alloc_size_ = space_for_string + page_size;
-    mem_ = mmap(NULL, alloc_size_,
-                PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0);
+    mem_ = mmap(NULL, alloc_size_, PROT_READ | PROT_WRITE,
+                MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     CHECK_NE(MAP_FAILED, mem_);
     protected_page_ = reinterpret_cast<char*>(mem_) + space_for_string;
     char* dst = protected_page_ - size;
@@ -83,7 +83,7 @@ class DataEndingAtUnreadablePage {
   ~DataEndingAtUnreadablePage() {
     const size_t page_size = sysconf(_SC_PAGESIZE);
     // Undo the mprotect.
-    CHECK_EQ(0, mprotect(protected_page_, page_size, PROT_READ|PROT_WRITE));
+    CHECK_EQ(0, mprotect(protected_page_, page_size, PROT_READ | PROT_WRITE));
     CHECK_EQ(0, munmap(mem_, alloc_size_));
   }
 
@@ -110,8 +110,7 @@ int VerifyString(const std::string& input) {
   DataEndingAtUnreadablePage i(input);
   const size_t written = snappy::Compress(i.data(), i.size(), &compressed);
   CHECK_EQ(written, compressed.size());
-  CHECK_LE(compressed.size(),
-           snappy::MaxCompressedLength(input.size()));
+  CHECK_LE(compressed.size(), snappy::MaxCompressedLength(input.size()));
   CHECK(snappy::IsValidCompressedBuffer(compressed.data(), compressed.size()));
 
   std::string uncompressed;
@@ -126,8 +125,7 @@ void VerifyStringSink(const std::string& input) {
   DataEndingAtUnreadablePage i(input);
   const size_t written = snappy::Compress(i.data(), i.size(), &compressed);
   CHECK_EQ(written, compressed.size());
-  CHECK_LE(compressed.size(),
-           snappy::MaxCompressedLength(input.size()));
+  CHECK_LE(compressed.size(), snappy::MaxCompressedLength(input.size()));
   CHECK(snappy::IsValidCompressedBuffer(compressed.data(), compressed.size()));
 
   std::string uncompressed;
@@ -224,10 +222,10 @@ void VerifyNonBlockedCompression(const std::string& input) {
   // Compress entire input in one shot
   std::string compressed;
   compressed += prefix;
-  compressed.resize(prefix.size()+snappy::MaxCompressedLength(input.size()));
+  compressed.resize(prefix.size() + snappy::MaxCompressedLength(input.size()));
   char* dest = string_as_array(&compressed) + prefix.size();
   char* end = snappy::internal::CompressFragment(input.data(), input.size(),
-                                                dest, table, table_size);
+                                                 dest, table, table_size);
   compressed.resize(end - compressed.data());
 
   // Uncompress into std::string
@@ -328,7 +326,7 @@ TEST(CorruptedTest, VerifyCorrupted) {
   CHECK(!IsValidCompressedBuffer(dest));
   CHECK(!Uncompress(dest, &uncmp));
 
-  if (sizeof(void *) == 4) {
+  if (sizeof(void*) == 4) {
     // Another security check; check a crazy big length can't DoS us with an
     // over-allocation.
     // Currently this is done only for 32-bit builds.  On 64-bit builds,
@@ -357,12 +355,12 @@ TEST(CorruptedTest, VerifyCorrupted) {
     std::string uncmp;
     // check that we don't return a crazy length
     size_t ulen;
-    CHECK(!snappy::GetUncompressedLength(data.data(), data.size(), &ulen)
-          || (ulen < (1<<20)));
+    CHECK(!snappy::GetUncompressedLength(data.data(), data.size(), &ulen) ||
+          (ulen < (1 << 20)));
     uint32_t ulen2;
     snappy::ByteArraySource source(data.data(), data.size());
     CHECK(!snappy::GetUncompressedLength(&source, &ulen2) ||
-          (ulen2 < (1<<20)));
+          (ulen2 < (1 << 20)));
     CHECK(!IsValidCompressedBuffer(data));
     CHECK(!Uncompress(data, &uncmp));
   }
@@ -386,7 +384,7 @@ void AppendLiteral(std::string* dst, const std::string& literal) {
       number[count++] = n & 0xff;
       n >>= 8;
     }
-    dst->push_back(0 | ((59+count) << 2));
+    dst->push_back(0 | ((59 + count) << 2));
     *dst += std::string(number, count);
   }
   *dst += literal;
@@ -406,15 +404,15 @@ void AppendCopy(std::string* dst, int offset, int length) {
     length -= to_copy;
 
     if ((to_copy >= 4) && (to_copy < 12) && (offset < 2048)) {
-      assert(to_copy-4 < 8);            // Must fit in 3 bits
-      dst->push_back(1 | ((to_copy-4) << 2) | ((offset >> 8) << 5));
+      assert(to_copy - 4 < 8);  // Must fit in 3 bits
+      dst->push_back(1 | ((to_copy - 4) << 2) | ((offset >> 8) << 5));
       dst->push_back(offset & 0xff);
     } else if (offset < 65536) {
-      dst->push_back(2 | ((to_copy-1) << 2));
+      dst->push_back(2 | ((to_copy - 1) << 2));
       dst->push_back(offset & 0xff);
       dst->push_back(offset >> 8);
     } else {
-      dst->push_back(3 | ((to_copy-1) << 2));
+      dst->push_back(3 | ((to_copy - 1) << 2));
       dst->push_back(offset & 0xff);
       dst->push_back((offset >> 8) & 0xff);
       dst->push_back((offset >> 16) & 0xff);
@@ -655,8 +653,7 @@ TEST(Snappy, CompressionContextStaticWorkspace) {
 // Reports an arbitrary number of bytes available without materializing them.
 class OversizedSource : public Source {
  public:
-  explicit OversizedSource(uint64_t total)
-      : left_(total), buf_(1 << 16, 'a') {}
+  explicit OversizedSource(uint64_t total) : left_(total), buf_(1 << 16, 'a') {}
   size_t Available() const override { return static_cast<size_t>(left_); }
   const char* Peek(size_t* len) override {
     *len = static_cast<size_t>(std::min<uint64_t>(left_, buf_.size()));
@@ -741,8 +738,8 @@ TEST(Snappy, FourByteOffset) {
 
   std::string uncompressed;
   CHECK(snappy::IsValidCompressedBuffer(compressed.data(), compressed.size()));
-  CHECK(snappy::Uncompress(compressed.data(), compressed.size(),
-                           &uncompressed));
+  CHECK(
+      snappy::Uncompress(compressed.data(), compressed.size(), &uncompressed));
   CHECK_EQ(uncompressed, src);
 }
 
@@ -773,7 +770,7 @@ TEST(Snappy, IOVecSinkEdgeCases) {
   // Our output blocks look like this initially (the last iovec is bigger
   // than depicted):
   // [  ] [ ] [    ] [        ] [        ]
-  static const int kLengths[] = { 2, 1, 4, 8, 128 };
+  static const int kLengths[] = {2, 1, 4, 8, 128};
 
   struct iovec iov[ARRAYSIZE(kLengths)];
   for (int i = 0; i < ARRAYSIZE(kLengths); ++i) {
@@ -820,8 +817,8 @@ TEST(Snappy, IOVecSinkEdgeCases) {
   //           ^-                     ^-
   AppendCopy(&compressed, 17, 4);
 
-  CHECK(snappy::RawUncompressToIOVec(
-      compressed.data(), compressed.size(), iov, ARRAYSIZE(iov)));
+  CHECK(snappy::RawUncompressToIOVec(compressed.data(), compressed.size(), iov,
+                                     ARRAYSIZE(iov)));
   CHECK_EQ(0, memcmp(iov[0].iov_base, "ab", 2));
   CHECK_EQ(0, memcmp(iov[1].iov_base, "c", 1));
   CHECK_EQ(0, memcmp(iov[2].iov_base, "1231", 4));
@@ -829,12 +826,12 @@ TEST(Snappy, IOVecSinkEdgeCases) {
   CHECK_EQ(0, memcmp(iov[4].iov_base, "123bc12", 7));
 
   for (int i = 0; i < ARRAYSIZE(kLengths); ++i) {
-    delete[] reinterpret_cast<char *>(iov[i].iov_base);
+    delete[] reinterpret_cast<char*>(iov[i].iov_base);
   }
 }
 
 TEST(Snappy, IOVecLiteralOverflow) {
-  static const int kLengths[] = { 3, 4 };
+  static const int kLengths[] = {3, 4};
 
   struct iovec iov[ARRAYSIZE(kLengths)];
   for (int i = 0; i < ARRAYSIZE(kLengths); ++i) {
@@ -847,16 +844,16 @@ TEST(Snappy, IOVecLiteralOverflow) {
 
   AppendLiteral(&compressed, "12345678");
 
-  CHECK(!snappy::RawUncompressToIOVec(
-      compressed.data(), compressed.size(), iov, ARRAYSIZE(iov)));
+  CHECK(!snappy::RawUncompressToIOVec(compressed.data(), compressed.size(), iov,
+                                      ARRAYSIZE(iov)));
 
   for (int i = 0; i < ARRAYSIZE(kLengths); ++i) {
-    delete[] reinterpret_cast<char *>(iov[i].iov_base);
+    delete[] reinterpret_cast<char*>(iov[i].iov_base);
   }
 }
 
 TEST(Snappy, IOVecCopyOverflow) {
-  static const int kLengths[] = { 3, 4 };
+  static const int kLengths[] = {3, 4};
 
   struct iovec iov[ARRAYSIZE(kLengths)];
   for (int i = 0; i < ARRAYSIZE(kLengths); ++i) {
@@ -870,18 +867,17 @@ TEST(Snappy, IOVecCopyOverflow) {
   AppendLiteral(&compressed, "123");
   AppendCopy(&compressed, 3, 5);
 
-  CHECK(!snappy::RawUncompressToIOVec(
-      compressed.data(), compressed.size(), iov, ARRAYSIZE(iov)));
+  CHECK(!snappy::RawUncompressToIOVec(compressed.data(), compressed.size(), iov,
+                                      ARRAYSIZE(iov)));
 
   for (int i = 0; i < ARRAYSIZE(kLengths); ++i) {
-    delete[] reinterpret_cast<char *>(iov[i].iov_base);
+    delete[] reinterpret_cast<char*>(iov[i].iov_base);
   }
 }
 
 bool CheckUncompressedLength(const std::string& compressed, size_t* ulength) {
-  const bool result1 = snappy::GetUncompressedLength(compressed.data(),
-                                                     compressed.size(),
-                                                     ulength);
+  const bool result1 = snappy::GetUncompressedLength(
+      compressed.data(), compressed.size(), ulength);
 
   snappy::ByteArraySource source(compressed.data(), compressed.size());
   uint32_t length;
@@ -896,8 +892,8 @@ TEST(SnappyCorruption, TruncatedVarint) {
   compressed.push_back('\xf0');
   CHECK(!CheckUncompressedLength(compressed, &ulength));
   CHECK(!snappy::IsValidCompressedBuffer(compressed.data(), compressed.size()));
-  CHECK(!snappy::Uncompress(compressed.data(), compressed.size(),
-                            &uncompressed));
+  CHECK(
+      !snappy::Uncompress(compressed.data(), compressed.size(), &uncompressed));
 }
 
 TEST(SnappyCorruption, UnterminatedVarint) {
@@ -911,8 +907,8 @@ TEST(SnappyCorruption, UnterminatedVarint) {
   compressed.push_back(10);
   CHECK(!CheckUncompressedLength(compressed, &ulength));
   CHECK(!snappy::IsValidCompressedBuffer(compressed.data(), compressed.size()));
-  CHECK(!snappy::Uncompress(compressed.data(), compressed.size(),
-                            &uncompressed));
+  CHECK(
+      !snappy::Uncompress(compressed.data(), compressed.size(), &uncompressed));
 }
 
 TEST(SnappyCorruption, OverflowingVarint) {
@@ -925,8 +921,8 @@ TEST(SnappyCorruption, OverflowingVarint) {
   compressed.push_back('\x7f');
   CHECK(!CheckUncompressedLength(compressed, &ulength));
   CHECK(!snappy::IsValidCompressedBuffer(compressed.data(), compressed.size()));
-  CHECK(!snappy::Uncompress(compressed.data(), compressed.size(),
-                            &uncompressed));
+  CHECK(
+      !snappy::Uncompress(compressed.data(), compressed.size(), &uncompressed));
 }
 
 TEST(Snappy, ReadPastEndOfBuffer) {
@@ -1008,13 +1004,13 @@ TEST(Snappy, LiteralLengthU32Overflow) {
   AppendCopy(&compressed, 1, 62);
 
   std::string uncompressed;
-  EXPECT_FALSE(snappy::Uncompress(compressed.data(), compressed.size(),
-                                  &uncompressed));
-  EXPECT_FALSE(snappy::IsValidCompressedBuffer(compressed.data(),
-                                               compressed.size()));
+  EXPECT_FALSE(
+      snappy::Uncompress(compressed.data(), compressed.size(), &uncompressed));
+  EXPECT_FALSE(
+      snappy::IsValidCompressedBuffer(compressed.data(), compressed.size()));
 }
 
-int TestFindMatchLength(const char* s1, const char *s2, unsigned length) {
+int TestFindMatchLength(const char* s1, const char* s2, unsigned length) {
   uint64_t data;
   std::pair<size_t, bool> p =
       snappy::internal::FindMatchLength(s1, s2, s2 + length, &data);
@@ -1080,14 +1076,14 @@ TEST(Snappy, FindMatchLength) {
   EXPECT_EQ(11, TestFindMatchLength("xxxxxx0123abc", "xxxxxx0123axc", 13));
 
   // Find non-match at once in first loop.
-  EXPECT_EQ(6, TestFindMatchLength("xxxxxx0123xxxxxxxx",
-                                   "xxxxxx?123xxxxxxxx", 18));
-  EXPECT_EQ(7, TestFindMatchLength("xxxxxx0123xxxxxxxx",
-                                   "xxxxxx0?23xxxxxxxx", 18));
-  EXPECT_EQ(8, TestFindMatchLength("xxxxxx0123xxxxxxxx",
-                                   "xxxxxx0132xxxxxxxx", 18));
-  EXPECT_EQ(9, TestFindMatchLength("xxxxxx0123xxxxxxxx",
-                                   "xxxxxx012?xxxxxxxx", 18));
+  EXPECT_EQ(
+      6, TestFindMatchLength("xxxxxx0123xxxxxxxx", "xxxxxx?123xxxxxxxx", 18));
+  EXPECT_EQ(
+      7, TestFindMatchLength("xxxxxx0123xxxxxxxx", "xxxxxx0?23xxxxxxxx", 18));
+  EXPECT_EQ(
+      8, TestFindMatchLength("xxxxxx0123xxxxxxxx", "xxxxxx0132xxxxxxxx", 18));
+  EXPECT_EQ(
+      9, TestFindMatchLength("xxxxxx0123xxxxxxxx", "xxxxxx012?xxxxxxxx", 18));
 
   // Same, but edge cases.
   EXPECT_EQ(6, TestFindMatchLength("xxxxxx0123", "xxxxxx?123", 10));
@@ -1096,14 +1092,14 @@ TEST(Snappy, FindMatchLength) {
   EXPECT_EQ(9, TestFindMatchLength("xxxxxx0123", "xxxxxx012?", 10));
 
   // Find non-match in first loop after one block.
-  EXPECT_EQ(10, TestFindMatchLength("xxxxxxabcd0123xx",
-                                    "xxxxxxabcd?123xx", 16));
-  EXPECT_EQ(11, TestFindMatchLength("xxxxxxabcd0123xx",
-                                    "xxxxxxabcd0?23xx", 16));
-  EXPECT_EQ(12, TestFindMatchLength("xxxxxxabcd0123xx",
-                                    "xxxxxxabcd0132xx", 16));
-  EXPECT_EQ(13, TestFindMatchLength("xxxxxxabcd0123xx",
-                                    "xxxxxxabcd012?xx", 16));
+  EXPECT_EQ(10,
+            TestFindMatchLength("xxxxxxabcd0123xx", "xxxxxxabcd?123xx", 16));
+  EXPECT_EQ(11,
+            TestFindMatchLength("xxxxxxabcd0123xx", "xxxxxxabcd0?23xx", 16));
+  EXPECT_EQ(12,
+            TestFindMatchLength("xxxxxxabcd0123xx", "xxxxxxabcd0132xx", 16));
+  EXPECT_EQ(13,
+            TestFindMatchLength("xxxxxxabcd0123xx", "xxxxxxabcd012?xx", 16));
 
   // Same, but edge cases.
   EXPECT_EQ(10, TestFindMatchLength("xxxxxxabcd0123", "xxxxxxabcd?123", 14));
@@ -1145,20 +1141,20 @@ TEST(Snappy, FindMatchLengthRandom) {
 uint16_t MakeEntry(unsigned int extra, unsigned int len,
                    unsigned int copy_offset) {
   // Check that all of the fields fit within the allocated space
-  assert(extra       == (extra & 0x7));          // At most 3 bits
-  assert(copy_offset == (copy_offset & 0x7));    // At most 3 bits
-  assert(len         == (len & 0x7f));           // At most 7 bits
+  assert(extra == (extra & 0x7));              // At most 3 bits
+  assert(copy_offset == (copy_offset & 0x7));  // At most 3 bits
+  assert(len == (len & 0x7f));                 // At most 7 bits
   return len | (copy_offset << 8) | (extra << 11);
 }
 
 // Check that the decompression table is correct, and optionally print out
 // the computed one.
 TEST(Snappy, VerifyCharTable) {
-  using snappy::internal::LITERAL;
+  using snappy::internal::char_table;
   using snappy::internal::COPY_1_BYTE_OFFSET;
   using snappy::internal::COPY_2_BYTE_OFFSET;
   using snappy::internal::COPY_4_BYTE_OFFSET;
-  using snappy::internal::char_table;
+  using snappy::internal::LITERAL;
 
   uint16_t dst[256];
 
@@ -1222,8 +1218,7 @@ TEST(Snappy, VerifyCharTable) {
   if (snappy::GetFlag(FLAGS_snappy_dump_decompression_table)) {
     std::printf("static const uint16_t char_table[256] = {\n  ");
     for (int i = 0; i < 256; ++i) {
-      std::printf("0x%04x%s",
-                  dst[i],
+      std::printf("0x%04x%s", dst[i],
                   ((i == 255) ? "\n" : (((i % 8) == 7) ? ",\n  " : ", ")));
     }
     std::printf("};\n");
@@ -1240,6 +1235,63 @@ TEST(Snappy, TestBenchmarkFiles) {
     Verify(ReadTestDataFile(kTestDataFiles[i].filename,
                             kTestDataFiles[i].size_limit));
   }
+}
+
+TEST(SnappyIsaDetection, EvaluateX86CpuidBitsOsXsaveGate) {
+  using namespace snappy::internal;
+  // Leaf 1 ECX bits: SSSE3 (bit 9), SSE4.2 (bit 20), OSXSAVE (bit 27), AVX (bit
+  // 28)
+  constexpr uint32_t kLeaf1Haswell =
+      (1u << 9) | (1u << 20) | (1u << 27) | (1u << 28);
+  // Leaf 7 EBX bits: BMI1 (bit 3), AVX2 (bit 5), BMI2 (bit 8), AVX512F (bit 16)
+  constexpr uint32_t kLeaf7SkylakeX =
+      (1u << 3) | (1u << 5) | (1u << 8) | (1u << 16);
+
+  // 1. Full OS-XSAVE support (XCR0 bits 1 & 2 = 0x6): enables up to AVX2+BMI2,
+  // never enables any AVX-512 flag.
+  static_assert(EvaluateX86CpuidBits(7, kLeaf1Haswell, 0x6, kLeaf7SkylakeX) ==
+                    kIsaX86_AVX2Tier,
+                "Expected full AVX2+BMI2 tier");
+  EXPECT_EQ(kIsaX86_AVX2Tier,
+            EvaluateX86CpuidBits(7, kLeaf1Haswell, 0x6, kLeaf7SkylakeX));
+
+  // 2. Hypervisor disables YMM state in XCR0 (xcr0 == 0x2, only XMM enabled):
+  // must NOT set kIsaAVX or kIsaAVX2, but MUST preserve SSSE3, SSE4.2, BMI1,
+  // BMI2.
+  EXPECT_EQ(kIsaSSSE3 | kIsaSSE42 | kIsaBMI1 | kIsaBMI2,
+            EvaluateX86CpuidBits(7, kLeaf1Haswell, 0x2, kLeaf7SkylakeX));
+
+  // 3. OSXSAVE bit (bit 27) clear in Leaf 1 ECX even if xcr0 == 0x6:
+  // must NOT set kIsaAVX or kIsaAVX2.
+  constexpr uint32_t kLeaf1NoOsXsave = (1u << 9) | (1u << 20) | (1u << 28);
+  EXPECT_EQ(kIsaSSSE3 | kIsaSSE42 | kIsaBMI1 | kIsaBMI2,
+            EvaluateX86CpuidBits(7, kLeaf1NoOsXsave, 0x6, kLeaf7SkylakeX));
+
+  // 4. PCLMULQDQ bit (bit 1) alone must NOT trigger kIsaSSSE3 (streamvbyte bug
+  // check).
+  EXPECT_EQ(kIsaDefault, EvaluateX86CpuidBits(1, (1u << 1), 0x0, 0x0));
+
+  // 5. Max basic leaf < 1 returns kIsaDefault.
+  EXPECT_EQ(kIsaDefault,
+            EvaluateX86CpuidBits(0, kLeaf1Haswell, 0x6, kLeaf7SkylakeX));
+}
+
+TEST(SnappyIsaDetection, HostDetectionAndTestingOverride) {
+  using namespace snappy::internal;
+  ResetArchitectureMaskForTesting();
+  const uint32_t host_mask = GetSupportedArchitectures();
+  EXPECT_EQ(0u, host_mask & kIsaUninitialized);
+#if SNAPPY_IS_AARCH64
+  EXPECT_NE(0u, host_mask & kIsaNEON);
+#endif
+  // Clamping check: forcing all bits must clamp to host_mask (never enabling
+  // unsupported ISAs).
+  SetArchitectureMaskForTesting(0x7fffffffu);
+  EXPECT_EQ(host_mask, GetSupportedArchitectures());
+  SetArchitectureMaskForTesting(kIsaDefault);
+  EXPECT_EQ(kIsaDefault, GetSupportedArchitectures());
+  ResetArchitectureMaskForTesting();
+  EXPECT_EQ(host_mask, GetSupportedArchitectures());
 }
 
 }  // namespace
