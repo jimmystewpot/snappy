@@ -1237,6 +1237,108 @@ TEST(Snappy, TestBenchmarkFiles) {
   }
 }
 
+TEST(Snappy, CpuDispatchCompressionTiers) {
+  using namespace snappy::internal;
+  ResetArchitectureMaskForTesting();
+  const uint32_t host_mask = GetSupportedArchitectures();
+  std::vector<uint32_t> tiers = {kIsaDefault};
+#if SNAPPY_IS_X86_64
+  if ((host_mask & kIsaX86_SSE42Tier) == kIsaX86_SSE42Tier) {
+    tiers.push_back(kIsaX86_SSE42Tier);
+  }
+  if ((host_mask & kIsaX86_AVX2Tier) == kIsaX86_AVX2Tier) {
+    tiers.push_back(kIsaX86_AVX2Tier);
+  }
+#elif SNAPPY_IS_AARCH64
+  tiers.push_back(kIsaNEON);
+  if (host_mask & kIsaNEON_CRC32) {
+    tiers.push_back(kIsaNEON | kIsaNEON_CRC32);
+  }
+#endif
+
+  const std::string payload = ReadTestDataFile("alice29.txt", 0);
+  ASSERT_FALSE(payload.empty());
+
+  for (int level : {1, 2}) {
+    snappy::CompressionOptions opts;
+    opts.level = level;
+    for (uint32_t c_mask : tiers) {
+      SetArchitectureMaskForTesting(c_mask);
+      std::string compressed;
+      snappy::Compress(payload.data(), payload.size(), &compressed, opts);
+      EXPECT_TRUE(snappy::IsValidCompressedBuffer(compressed.data(),
+                                                  compressed.size()));
+      std::string uncompressed;
+      EXPECT_TRUE(snappy::Uncompress(compressed.data(), compressed.size(),
+                                     &uncompressed));
+      EXPECT_EQ(payload, uncompressed);
+    }
+  }
+
+  // On hosts with hardware CRC32 (SSE4.2 or ARM CRC32), verify that level-1
+  // kIsaDefault (Knuth multiply hash) and hardware CRC32 tier both produce
+  // valid streams on alice29.txt AND execute distinct hash functions.
+#if SNAPPY_IS_AARCH64
+  if (host_mask & kIsaNEON_CRC32) {
+    SetArchitectureMaskForTesting(kIsaNEON);
+    std::string comp_scalar;
+    snappy::Compress(payload.data(), payload.size(), &comp_scalar);
+    SetArchitectureMaskForTesting(kIsaNEON | kIsaNEON_CRC32);
+    std::string comp_crc32;
+    snappy::Compress(payload.data(), payload.size(), &comp_crc32);
+    EXPECT_NE(comp_scalar, comp_crc32);
+  }
+#elif SNAPPY_IS_X86_64
+  if ((host_mask & kIsaX86_SSE42Tier) == kIsaX86_SSE42Tier) {
+    SetArchitectureMaskForTesting(kIsaDefault);
+    std::string comp_scalar;
+    snappy::Compress(payload.data(), payload.size(), &comp_scalar);
+    SetArchitectureMaskForTesting(kIsaX86_SSE42Tier);
+    std::string comp_crc32;
+    snappy::Compress(payload.data(), payload.size(), &comp_crc32);
+    EXPECT_NE(comp_scalar, comp_crc32);
+    if ((host_mask & kIsaX86_AVX2Tier) == kIsaX86_AVX2Tier) {
+      SetArchitectureMaskForTesting(kIsaX86_AVX2Tier);
+      std::string comp_avx2;
+      snappy::Compress(payload.data(), payload.size(), &comp_avx2);
+      // SSE4.2 and AVX2_BMI2 both use _mm_crc32_u32 and must emit identical
+      // bytes.
+      EXPECT_EQ(comp_crc32, comp_avx2);
+    }
+  }
+#endif
+  ResetArchitectureMaskForTesting();
+}
+
+TEST(Snappy, CpuDispatchSmallAndBoundaryInputs) {
+  using namespace snappy::internal;
+  ResetArchitectureMaskForTesting();
+  const uint32_t host_mask = GetSupportedArchitectures();
+  const size_t kBoundarySizes[] = {0,   1,   2,   7,   14,  15,  16,
+                                   17,  63,  64,  65,  127, 128, 129,
+                                   130, 131, 255, 256, 257};
+  for (uint32_t mask : {uint32_t{kIsaDefault}, host_mask}) {
+    SetArchitectureMaskForTesting(mask);
+    for (size_t sz : kBoundarySizes) {
+      std::string input(sz, '\0');
+      for (size_t i = 0; i < sz; ++i) {
+        input[i] = static_cast<char>('a' + (i % 7));
+      }
+      for (int level : {1, 2}) {
+        snappy::CompressionOptions opts;
+        opts.level = level;
+        std::string compressed;
+        snappy::Compress(input.data(), input.size(), &compressed, opts);
+        std::string roundtrip;
+        EXPECT_TRUE(snappy::Uncompress(compressed.data(), compressed.size(),
+                                       &roundtrip));
+        EXPECT_EQ(input, roundtrip);
+      }
+    }
+  }
+  ResetArchitectureMaskForTesting();
+}
+
 TEST(SnappyIsaDetection, EvaluateX86CpuidBitsOsXsaveGate) {
   using namespace snappy::internal;
   // Leaf 1 ECX bits: SSSE3 (bit 9), SSE4.2 (bit 20), OSXSAVE (bit 27), AVX (bit

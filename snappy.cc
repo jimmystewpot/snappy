@@ -80,28 +80,20 @@
 #endif
 #endif  // !defined(SNAPPY_HAVE_BMI2)
 
-#if !defined(SNAPPY_HAVE_X86_CRC32)
-#if defined(__SSE4_2__)
-#define SNAPPY_HAVE_X86_CRC32 1
-#else
-#define SNAPPY_HAVE_X86_CRC32 0
-#endif
-#endif  // !defined(SNAPPY_HAVE_X86_CRC32)
-
-#if !defined(SNAPPY_HAVE_NEON_CRC32)
-#if SNAPPY_HAVE_NEON && defined(__ARM_FEATURE_CRC32)
-#define SNAPPY_HAVE_NEON_CRC32 1
-#else
-#define SNAPPY_HAVE_NEON_CRC32 0
-#endif
-#endif  // !defined(SNAPPY_HAVE_NEON_CRC32)
-
-#if SNAPPY_HAVE_BMI2 || SNAPPY_HAVE_X86_CRC32
-// Please do not replace with <x86intrin.h>. or with headers that assume more
+#if SNAPPY_IS_X86_64
+// Please do not replace with <x86intrin.h> or with headers that assume more
 // advanced SSE versions without checking with all the OWNERS.
 #include <immintrin.h>
-#elif SNAPPY_HAVE_NEON_CRC32
+#endif
+
+#if SNAPPY_IS_AARCH64
+#if defined(_MSC_VER)
+#include <intrin.h>
+#else
+SNAPPY_TARGET_ARM_CRC32
 #include <arm_acle.h>
+SNAPPY_UNTARGET_REGION
+#endif
 #endif
 
 #include <algorithm>
@@ -279,35 +271,67 @@ constexpr std::array<int16_t, 256> MakeTable(index_sequence<seq...>) {
 alignas(64) const std::array<int16_t, 256> kLengthMinusOffset =
     MakeTable(make_index_sequence<256>{});
 
+enum class CompressIsaTier {
+  kScalar,
+  kX86_SSE42,
+  kX86_AVX2_BMI2,
+  kARM_CRC32,
+};
+
 // Given a table of uint16_t whose size is mask / 2 + 1, return a pointer to the
 // relevant entry, if any, for the given bytes.  Any hash function will do,
 // but a good hash function reduces the number of collisions and thus yields
 // better compression for compressible input.
 //
 // REQUIRES: mask is 2 * (table_size - 1), and table_size is a power of two.
-inline uint16_t* TableEntry(uint16_t* table, uint32_t bytes, uint32_t mask) {
-  // Our choice is quicker-and-dirtier than the typical hash function;
-  // empirically, that seems beneficial.  The upper bits of kMagic * bytes are a
-  // higher-quality hash than the lower bits, so when using kMagic * bytes we
-  // also shift right to get a higher-quality end result.  There's no similar
-  // issue with a CRC because all of the output bits of a CRC are equally good
-  // "hashes." So, a CPU instruction for CRC, if available, tends to be a good
-  // choice.
-#if SNAPPY_HAVE_NEON_CRC32
-  // We use mask as the second arg to the CRC function, as it's about to
-  // be used anyway; it'd be equally correct to use 0 or some constant.
-  // Mathematically, _mm_crc32_u32 (or similar) is a function of the
-  // xor of its arguments.
-  const uint32_t hash = __crc32cw(bytes, mask);
-#elif SNAPPY_HAVE_X86_CRC32
-  const uint32_t hash = _mm_crc32_u32(bytes, mask);
-#else
-  constexpr uint32_t kMagic = 0x1e35a7bd;
+template <CompressIsaTier Tier>
+inline uint16_t* TableEntryTier(uint16_t* table, uint32_t bytes, uint32_t mask);
+
+template <>
+inline uint16_t* TableEntryTier<CompressIsaTier::kScalar>(uint16_t* table,
+                                                          uint32_t bytes,
+                                                          uint32_t mask) {
+  constexpr uint32_t kMagic = 0x1e35a7bdU;
   const uint32_t hash = (kMagic * bytes) >> (31 - kMaxHashTableBits);
-#endif
   return reinterpret_cast<uint16_t*>(reinterpret_cast<uintptr_t>(table) +
                                      (hash & mask));
 }
+
+#if SNAPPY_IS_X86_64
+SNAPPY_TARGET_SSE42
+template <>
+inline uint16_t* TableEntryTier<CompressIsaTier::kX86_SSE42>(uint16_t* table,
+                                                             uint32_t bytes,
+                                                             uint32_t mask) {
+  const uint32_t hash = _mm_crc32_u32(bytes, mask);
+  return reinterpret_cast<uint16_t*>(reinterpret_cast<uintptr_t>(table) +
+                                     (hash & mask));
+}
+SNAPPY_UNTARGET_REGION
+
+SNAPPY_TARGET_AVX2_BMI2
+template <>
+inline uint16_t* TableEntryTier<CompressIsaTier::kX86_AVX2_BMI2>(
+    uint16_t* table, uint32_t bytes, uint32_t mask) {
+  const uint32_t hash = _mm_crc32_u32(bytes, mask);
+  return reinterpret_cast<uint16_t*>(reinterpret_cast<uintptr_t>(table) +
+                                     (hash & mask));
+}
+SNAPPY_UNTARGET_REGION
+#endif  // SNAPPY_IS_X86_64
+
+#if SNAPPY_IS_AARCH64
+SNAPPY_TARGET_ARM_CRC32
+template <>
+inline uint16_t* TableEntryTier<CompressIsaTier::kARM_CRC32>(uint16_t* table,
+                                                             uint32_t bytes,
+                                                             uint32_t mask) {
+  const uint32_t hash = __crc32cw(bytes, mask);
+  return reinterpret_cast<uint16_t*>(reinterpret_cast<uintptr_t>(table) +
+                                     (hash & mask));
+}
+SNAPPY_UNTARGET_REGION
+#endif  // SNAPPY_IS_AARCH64
 
 inline uint16_t* TableEntry4ByteMatch(uint16_t* table, uint32_t bytes,
                                       uint32_t mask) {
@@ -942,8 +966,10 @@ uint16_t* WorkingMemory::GetHashTable(size_t fragment_size,
 // Returns an "end" pointer into "op" buffer.
 // "end - op" is the compressed size of "input".
 namespace internal {
-char* CompressFragment(const char* input, size_t input_size, char* op,
-                       uint16_t* table, const int table_size) {
+template <CompressIsaTier Tier>
+SNAPPY_ATTRIBUTE_ALWAYS_INLINE inline char* CompressFragmentImpl(
+    const char* input, size_t input_size, char* op, uint16_t* table,
+    const int table_size) {
   // "ip" is the input pointer, and "op" is the output pointer.
   const char* ip = input;
   assert(input_size <= kBlockSize);
@@ -999,7 +1025,7 @@ char* CompressFragment(const char* input, size_t input_size, char* op,
             // loaded in preload.
             uint32_t dword = i == 0 ? preload : static_cast<uint32_t>(data);
             assert(dword == LittleEndian::Load32(ip + i));
-            uint16_t* table_entry = TableEntry(table, dword, mask);
+            uint16_t* table_entry = TableEntryTier<Tier>(table, dword, mask);
             candidate = base_ip + *table_entry;
             assert(candidate >= base_ip);
             assert(candidate < ip + i);
@@ -1021,7 +1047,7 @@ char* CompressFragment(const char* input, size_t input_size, char* op,
       }
       while (true) {
         assert(static_cast<uint32_t>(data) == LittleEndian::Load32(ip));
-        uint16_t* table_entry = TableEntry(table, data, mask);
+        uint16_t* table_entry = TableEntryTier<Tier>(table, data, mask);
         uint32_t bytes_between_hash_lookups = skip >> 5;
         skip += bytes_between_hash_lookups;
         const char* next_ip = ip + bytes_between_hash_lookups;
@@ -1081,9 +1107,9 @@ char* CompressFragment(const char* input, size_t input_size, char* op,
         // We are now looking for a 4-byte match again.  We read
         // table[Hash(ip, mask)] for that.  To improve compression,
         // we also update table[Hash(ip - 1, mask)] and table[Hash(ip, mask)].
-        *TableEntry(table, LittleEndian::Load32(ip - 1), mask) =
+        *TableEntryTier<Tier>(table, LittleEndian::Load32(ip - 1), mask) =
             ip - base_ip - 1;
-        uint16_t* table_entry = TableEntry(table, data, mask);
+        uint16_t* table_entry = TableEntryTier<Tier>(table, data, mask);
         candidate = base_ip + *table_entry;
         *table_entry = ip - base_ip;
         // Measurements on the benchmarks have shown the following probabilities
@@ -1110,6 +1136,58 @@ emit_remainder:
   }
 
   return op;
+}
+
+#if SNAPPY_IS_X86_64
+SNAPPY_TARGET_SSE42
+char* CompressFragment_SSE42(const char* input, size_t input_size, char* op,
+                             uint16_t* table, const int table_size) {
+  return CompressFragmentImpl<CompressIsaTier::kX86_SSE42>(
+      input, input_size, op, table, table_size);
+}
+SNAPPY_UNTARGET_REGION
+
+SNAPPY_TARGET_AVX2_BMI2
+char* CompressFragment_AVX2_BMI2(const char* input, size_t input_size, char* op,
+                                 uint16_t* table, const int table_size) {
+  return CompressFragmentImpl<CompressIsaTier::kX86_AVX2_BMI2>(
+      input, input_size, op, table, table_size);
+}
+SNAPPY_UNTARGET_REGION
+#endif  // SNAPPY_IS_X86_64
+
+#if SNAPPY_IS_AARCH64
+SNAPPY_TARGET_ARM_CRC32
+char* CompressFragment_ARM_CRC32(const char* input, size_t input_size, char* op,
+                                 uint16_t* table, const int table_size) {
+  return CompressFragmentImpl<CompressIsaTier::kARM_CRC32>(
+      input, input_size, op, table, table_size);
+}
+SNAPPY_UNTARGET_REGION
+#endif  // SNAPPY_IS_AARCH64
+
+char* CompressFragment_Scalar(const char* input, size_t input_size, char* op,
+                              uint16_t* table, const int table_size) {
+  return CompressFragmentImpl<CompressIsaTier::kScalar>(input, input_size, op,
+                                                        table, table_size);
+}
+
+char* CompressFragment(const char* input, size_t input_size, char* op,
+                       uint16_t* table, const int table_size) {
+  const uint32_t mask = GetSupportedArchitectures();
+#if SNAPPY_IS_X86_64
+  if ((mask & kIsaX86_AVX2Tier) == kIsaX86_AVX2Tier) {
+    return CompressFragment_AVX2_BMI2(input, input_size, op, table, table_size);
+  }
+  if ((mask & kIsaX86_SSE42Tier) == kIsaX86_SSE42Tier) {
+    return CompressFragment_SSE42(input, input_size, op, table, table_size);
+  }
+#elif SNAPPY_IS_AARCH64
+  if (mask & kIsaNEON_CRC32) {
+    return CompressFragment_ARM_CRC32(input, input_size, op, table, table_size);
+  }
+#endif
+  return CompressFragment_Scalar(input, input_size, op, table, table_size);
 }
 
 char* CompressFragmentDoubleHash(const char* input, size_t input_size, char* op,
