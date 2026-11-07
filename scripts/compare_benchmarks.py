@@ -3,7 +3,9 @@
 
 Extracts median aggregates (or single-run entries if aggregates are absent),
 prints a Markdown comparison table and suite geometric mean deltas, and exits
-with code 1 if any suite geomean regresses by more than --max-regression-pct.
+with code 1 if any suite geomean regresses by more than --max-regression-pct,
+if zero throughput is detected in any comparison benchmark, or if benchmarks
+present in the baseline (before) are missing in the comparison (after).
 """
 
 import argparse
@@ -61,12 +63,26 @@ def compare_benchmarks(
     after_entries = load_benchmark_entries(after_path)
 
     common_names = sorted(set(before_entries.keys()) & set(after_entries.keys()))
-    if not common_names:
+    missing_in_after = sorted(set(before_entries.keys()) - set(after_entries.keys()))
+
+    if not common_names and not missing_in_after:
         print(
-            f"Error: No matching benchmarks found between {before_path} and {after_path}",
+            f"Error: No benchmarks found in {before_path}",
             file=sys.stderr,
         )
         return 1
+
+    has_error = False
+
+    if missing_in_after:
+        print(f"### Warning: Missing Benchmarks in After\n")
+        print(
+            f"{len(missing_in_after)} benchmark(s) present in before were missing in after:"
+        )
+        for m in missing_in_after:
+            print(f"- {m}")
+        print()
+        has_error = True
 
     # Print individual benchmark table
     print("| Benchmark | Before (MB/s) | After (MB/s) | Delta (%) |")
@@ -92,34 +108,82 @@ def compare_benchmarks(
     print("| Suite | Before (MB/s) | After (MB/s) | Delta (%) | Status |")
     print("| :--- | ---: | ---: | ---: | :--- |")
 
-    has_regression = False
-
     for suite_name, matcher in SUITES:
+        before_suite_benchmarks = [
+            name
+            for name in before_entries
+            if matcher(name, before_entries[name])
+        ]
+        if not before_suite_benchmarks:
+            continue
+
         matching_names = [
             name
             for name in common_names
             if name in benchmark_deltas
             and matcher(name, before_entries[name])
         ]
+
+        missing_in_suite = set(before_suite_benchmarks) - set(matching_names)
+
+        before_valid = [
+            get_throughput_mb_s(before_entries[n])
+            for n in before_suite_benchmarks
+            if get_throughput_mb_s(before_entries[n]) > 0
+        ]
+        before_geomean = (
+            math.exp(sum(math.log(x) for x in before_valid) / len(before_valid))
+            if before_valid
+            else 0.0
+        )
+
         if not matching_names:
+            has_error = True
+            status = "FAIL (entire suite missing in after)"
+            print(
+                f"| {suite_name} | {before_geomean:.2f} | 0.00 | -100.00% | {status} |"
+            )
             continue
 
-        ratios = [benchmark_deltas[n][1] / benchmark_deltas[n][0] for n in matching_names]
+        if missing_in_suite:
+            has_error = True
+            status = f"FAIL ({len(missing_in_suite)} benchmark(s) missing in after)"
+            print(
+                f"| {suite_name} | {before_geomean:.2f} | 0.00 | -100.00% | {status} |"
+            )
+            continue
+
+        zero_throughput_names = [
+            n for n in matching_names if benchmark_deltas[n][1] <= 0
+        ]
+        if zero_throughput_names:
+            has_error = True
+            status = (
+                f"FAIL (zero throughput in {len(zero_throughput_names)} benchmark(s))"
+            )
+            print(
+                f"| {suite_name} | {before_geomean:.2f} | 0.00 | -100.00% | {status} |"
+            )
+            continue
+
+        ratios = [
+            benchmark_deltas[n][1] / benchmark_deltas[n][0] for n in matching_names
+        ]
         log_ratios = [math.log(r) for r in ratios]
         geomean_ratio = math.exp(sum(log_ratios) / len(log_ratios))
         suite_delta_pct = (geomean_ratio - 1.0) * 100.0
 
-        before_geomean = math.exp(
-            sum(math.log(benchmark_deltas[n][0]) for n in matching_names) / len(matching_names)
-        )
         after_geomean = math.exp(
-            sum(math.log(benchmark_deltas[n][1]) for n in matching_names) / len(matching_names)
+            sum(math.log(benchmark_deltas[n][1]) for n in matching_names)
+            / len(matching_names)
         )
 
         regressed = suite_delta_pct < -max_regression_pct
         if regressed:
-            has_regression = True
-            status = f"FAIL (regression {abs(suite_delta_pct):.2f}% > {max_regression_pct:.2f}%)"
+            has_error = True
+            status = (
+                f"FAIL (regression {abs(suite_delta_pct):.2f}% > {max_regression_pct:.2f}%)"
+            )
         else:
             status = "PASS"
 
@@ -128,11 +192,15 @@ def compare_benchmarks(
         )
 
     print()
-    if has_regression:
-        print(f"Result: FAILED - one or more suites regressed by > {max_regression_pct:.2f}%\n")
+    if has_error:
+        print(
+            f"Result: FAILED - regressions, missing benchmarks, or zero throughput detected\n"
+        )
         return 1
     else:
-        print(f"Result: PASSED - all suite geomeans within threshold (<= {max_regression_pct:.2f}% regression)\n")
+        print(
+            f"Result: PASSED - all suite geomeans within threshold (<= {max_regression_pct:.2f}% regression)\n"
+        )
         return 0
 
 
