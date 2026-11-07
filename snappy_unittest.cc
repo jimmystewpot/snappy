@@ -1339,6 +1339,151 @@ TEST(Snappy, CpuDispatchSmallAndBoundaryInputs) {
   ResetArchitectureMaskForTesting();
 }
 
+TEST(Snappy, CpuDispatchPatternExtensionOffsets) {
+  using namespace snappy::internal;
+  ResetArchitectureMaskForTesting();
+  const uint32_t host_mask = GetSupportedArchitectures();
+  std::vector<uint32_t> tiers = {kIsaDefault};
+#if SNAPPY_IS_X86_64
+  if (host_mask & kIsaSSSE3) tiers.push_back(kIsaSSSE3);
+  if ((host_mask & kIsaX86_SSE42Tier) == kIsaX86_SSE42Tier) {
+    tiers.push_back(kIsaX86_SSE42Tier);
+  }
+  if ((host_mask & kIsaX86_AVX2Tier) == kIsaX86_AVX2Tier) {
+    tiers.push_back(kIsaX86_AVX2Tier);
+  }
+#elif SNAPPY_IS_AARCH64
+  tiers.push_back(kIsaNEON);
+  if (host_mask & kIsaNEON_CRC32) {
+    tiers.push_back(kIsaNEON | kIsaNEON_CRC32);
+  }
+#endif
+
+  // Test every repeat pattern size 1..20 both at the start of a buffer
+  // (op < 256 -> exercises IncrementalCopy in DecompressAllTags) and after
+  // a 300-byte prefix (op >= 256 -> exercises Copy64BytesWithPatternExtension
+  // in DecompressBranchless), with trailing slop to keep DecompressBranchless
+  // active.
+  for (size_t pat_size = 1; pat_size <= 20; ++pat_size) {
+    std::string pattern(pat_size, '\0');
+    for (size_t i = 0; i < pat_size; ++i) {
+      pattern[i] = static_cast<char>('A' + (i % 23));
+    }
+    for (bool with_prefix : {false, true}) {
+      std::string raw;
+      if (with_prefix) {
+        for (int i = 0; i < 300; ++i) {
+          raw.push_back(static_cast<char>((i * 37 + 13) & 0xff));
+        }
+      }
+      for (int rep = 0; rep < 64; ++rep) {
+        raw += pattern;
+      }
+      raw.append(256, 'Z');
+
+      for (uint32_t c_mask : tiers) {
+        SetArchitectureMaskForTesting(c_mask);
+        std::string compressed;
+        snappy::Compress(raw.data(), raw.size(), &compressed);
+        for (uint32_t d_mask : tiers) {
+          SetArchitectureMaskForTesting(d_mask);
+          std::string decompressed;
+          ASSERT_TRUE(snappy::Uncompress(compressed.data(), compressed.size(),
+                                         &decompressed));
+          ASSERT_EQ(raw, decompressed);
+          ASSERT_TRUE(snappy::IsValidCompressedBuffer(compressed.data(),
+                                                      compressed.size()));
+          // Also verify IOVec decompression path.
+          std::string iov_buf(raw.size(), '\0');
+          struct iovec iov[2];
+          size_t split = raw.size() / 2;
+          iov[0].iov_base = &iov_buf[0];
+          iov[0].iov_len = split;
+          iov[1].iov_base = &iov_buf[split];
+          iov[1].iov_len = raw.size() - split;
+          ASSERT_TRUE(snappy::RawUncompressToIOVec(compressed.data(),
+                                                   compressed.size(), iov, 2));
+          ASSERT_EQ(raw, iov_buf);
+        }
+      }
+    }
+  }
+  ResetArchitectureMaskForTesting();
+}
+
+TEST(Snappy, CpuDispatchCorruptedInputs) {
+  using namespace snappy::internal;
+  ResetArchitectureMaskForTesting();
+  const uint32_t host_mask = GetSupportedArchitectures();
+  std::vector<uint32_t> tiers = {kIsaDefault, host_mask};
+#if SNAPPY_IS_X86_64
+  if (host_mask & kIsaSSSE3) tiers.push_back(kIsaSSSE3);
+#endif
+  // 1. Copy with offset == 0
+  const char kBadOffsetZero[] =
+      "\x10\x04"
+      "abcd"
+      "\x01\x00";
+  // 2. Copy with offset > produced bytes
+  const char kBadOffsetTooLarge[] =
+      "\x10\x04"
+      "abcd"
+      "\x01\x05";
+  // 3. Truncated literal
+  const char kTruncatedLiteral[] =
+      "\x10\x20"
+      "abc";
+
+  for (uint32_t mask : tiers) {
+    SetArchitectureMaskForTesting(mask);
+    std::string out;
+    EXPECT_FALSE(
+        snappy::Uncompress(kBadOffsetZero, sizeof(kBadOffsetZero) - 1, &out));
+    EXPECT_FALSE(snappy::IsValidCompressedBuffer(kBadOffsetZero,
+                                                 sizeof(kBadOffsetZero) - 1));
+    EXPECT_FALSE(snappy::Uncompress(kBadOffsetTooLarge,
+                                    sizeof(kBadOffsetTooLarge) - 1, &out));
+    EXPECT_FALSE(snappy::IsValidCompressedBuffer(
+        kBadOffsetTooLarge, sizeof(kBadOffsetTooLarge) - 1));
+    EXPECT_FALSE(snappy::Uncompress(kTruncatedLiteral,
+                                    sizeof(kTruncatedLiteral) - 1, &out));
+    EXPECT_FALSE(snappy::IsValidCompressedBuffer(
+        kTruncatedLiteral, sizeof(kTruncatedLiteral) - 1));
+  }
+  ResetArchitectureMaskForTesting();
+}
+
+TEST(Snappy, CpuDispatchAllTiers) {
+  using namespace snappy::internal;
+  ResetArchitectureMaskForTesting();
+  const uint32_t host_mask = GetSupportedArchitectures();
+  std::vector<uint32_t> tiers = {kIsaDefault};
+#if SNAPPY_IS_X86_64
+  if (host_mask & kIsaSSSE3) tiers.push_back(kIsaSSSE3);
+  if ((host_mask & kIsaX86_SSE42Tier) == kIsaX86_SSE42Tier) {
+    tiers.push_back(kIsaX86_SSE42Tier);
+  }
+  if ((host_mask & kIsaX86_AVX2Tier) == kIsaX86_AVX2Tier) {
+    tiers.push_back(kIsaX86_AVX2Tier);
+  }
+#elif SNAPPY_IS_AARCH64
+  tiers.push_back(kIsaNEON);
+  if (host_mask & kIsaNEON_CRC32) {
+    tiers.push_back(kIsaNEON | kIsaNEON_CRC32);
+  }
+#endif
+
+  for (int i = 0; i < ARRAYSIZE(kTestDataFiles); ++i) {
+    std::string contents = ReadTestDataFile(kTestDataFiles[i].filename,
+                                            kTestDataFiles[i].size_limit);
+    for (uint32_t mask : tiers) {
+      SetArchitectureMaskForTesting(mask);
+      Verify(contents);
+    }
+  }
+  ResetArchitectureMaskForTesting();
+}
+
 TEST(SnappyIsaDetection, EvaluateX86CpuidBitsOsXsaveGate) {
   using namespace snappy::internal;
   // Leaf 1 ECX bits: SSSE3 (bit 9), SSE4.2 (bit 20), OSXSAVE (bit 27), AVX (bit

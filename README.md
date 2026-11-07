@@ -75,9 +75,10 @@ mkdir build
 cd build && cmake ../ && make
 ```
 
-MSVC users must manually set `SNAPPY_HAVE_SSSE3`, `SNAPPY_HAVE_X86_CRC32`,
-`SNAPPY_HAVE_BMI2`, `SNAPPY_HAVE_NEON_CRC32`, and `SNAPPY_HAVE_NEON` due to
-MSVC's incorrect architecture detection, if using pre-`/arch:AVX2`.
+On x86_64 and AArch64 platforms, Snappy automatically detects and dispatches
+SIMD and ISA optimizations (SSSE3, SSE4.2, AVX2, BMI2, and ARM NEON / CRC32) at
+runtime across GCC, Clang, and MSVC without requiring architecture-specific
+compiler flags.
 
 Usage
 =====

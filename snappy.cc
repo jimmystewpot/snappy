@@ -482,6 +482,10 @@ alignas(16) constexpr std::array<std::array<char, sizeof(V128)>,
         /*index_offset=*/16,
         /*pattern_sizes_minus_one=*/make_index_sequence<16>());
 
+#if SNAPPY_IS_X86_64
+SNAPPY_TARGET_REGION("ssse3")
+#endif
+
 SNAPPY_ATTRIBUTE_ALWAYS_INLINE
 static inline V128 LoadPattern(const char* src, const size_t pattern_size) {
   V128 generation_mask = V128_Load(reinterpret_cast<const V128*>(
@@ -509,22 +513,252 @@ LoadPatternAndReshuffleMask(const char* src, const size_t pattern_size) {
   return {pattern, reshuffle_mask};
 }
 
+#if SNAPPY_IS_X86_64
+SNAPPY_UNTARGET_REGION
+#endif
+
 #endif  // SNAPPY_HAVE_VECTOR_BYTE_SHUFFLE
 
-// Fallback for when we need to copy while extending the pattern, for example
-// copying 10 bytes from 3 positions back abc -> abcabcabcabca.
-//
-// REQUIRES: [dst - offset, dst + 64) is a valid address range.
-SNAPPY_ATTRIBUTE_ALWAYS_INLINE
-static inline bool Copy64BytesWithPatternExtension(char* dst, size_t offset) {
+}  // namespace
+
+enum class DecompressIsaTier {
+  kScalar,
+  kX86_SSSE3,
+  kX86_AVX2_BMI2,
+  kARM_NEON,
+};
+
+template <DecompressIsaTier Tier>
+inline uint32_t ExtractLowBytesTier(const uint32_t& v, int n);
+
+template <>
+inline uint32_t ExtractLowBytesTier<DecompressIsaTier::kScalar>(
+    const uint32_t& v, int n) {
+  assert(n >= 0);
+  assert(n <= 4);
+  uint64_t mask = 0xffffffff;
+  return v & ~(mask << (8 * n));
+}
+
+#if SNAPPY_IS_X86_64
+SNAPPY_TARGET_SSE42
+template <>
+inline uint32_t ExtractLowBytesTier<DecompressIsaTier::kX86_SSSE3>(
+    const uint32_t& v, int n) {
+  assert(n >= 0);
+  assert(n <= 4);
+  uint64_t mask = 0xffffffff;
+  return v & ~(mask << (8 * n));
+}
+SNAPPY_UNTARGET_REGION
+
+SNAPPY_TARGET_AVX2_BMI2
+template <>
+inline uint32_t ExtractLowBytesTier<DecompressIsaTier::kX86_AVX2_BMI2>(
+    const uint32_t& v, int n) {
+  assert(n >= 0);
+  assert(n <= 4);
+  return _bzhi_u32(v, 8 * n);
+}
+SNAPPY_UNTARGET_REGION
+#endif  // SNAPPY_IS_X86_64
+
+#if SNAPPY_IS_AARCH64
+template <>
+inline uint32_t ExtractLowBytesTier<DecompressIsaTier::kARM_NEON>(
+    const uint32_t& v, int n) {
+  assert(n >= 0);
+  assert(n <= 4);
+  uint64_t mask = 0xffffffff;
+  return v & ~(mask << (8 * n));
+}
+#endif  // SNAPPY_IS_AARCH64
+
+inline uint32_t ExtractLowBytes(const uint32_t& v, int n) {
+  return ExtractLowBytesTier<DecompressIsaTier::kScalar>(v, n);
+}
+
+template <DecompressIsaTier Tier>
+inline void MaybeZeroUpperTier();
+
+template <>
+inline void MaybeZeroUpperTier<DecompressIsaTier::kScalar>() {}
+
+#if SNAPPY_IS_X86_64
+SNAPPY_TARGET_SSE42
+template <>
+inline void MaybeZeroUpperTier<DecompressIsaTier::kX86_SSSE3>() {}
+SNAPPY_UNTARGET_REGION
+
+SNAPPY_TARGET_AVX2_BMI2
+template <>
+inline void MaybeZeroUpperTier<DecompressIsaTier::kX86_AVX2_BMI2>() {
+  _mm256_zeroupper();
+}
+SNAPPY_UNTARGET_REGION
+#endif  // SNAPPY_IS_X86_64
+
+#if SNAPPY_IS_AARCH64
+template <>
+inline void MaybeZeroUpperTier<DecompressIsaTier::kARM_NEON>() {}
+#endif  // SNAPPY_IS_AARCH64
+
+template <DecompressIsaTier Tier>
+inline void MemCopy64Tier(char* dst, const void* src, size_t size);
+
+template <DecompressIsaTier Tier>
+inline void MemCopy64Tier(ptrdiff_t dst, const void* src, size_t size) {
+  (void)dst;
+  (void)src;
+  (void)size;
+}
+
+template <>
+inline void MemCopy64Tier<DecompressIsaTier::kScalar>(char* dst,
+                                                      const void* src,
+                                                      size_t size) {
+  constexpr int kShortMemCopy = 32;
+  (void)kShortMemCopy;
+  assert(size <= 64);
+  assert(std::less_equal<const void*>()(static_cast<const char*>(src) + size,
+                                        dst) ||
+         std::less_equal<const void*>()(dst + size, src));
+#if defined(__riscv) && SNAPPY_HAVE_RVV
+  unsigned char* dst_ptr = reinterpret_cast<unsigned char*>(dst);
+  const unsigned char* src_ptr = reinterpret_cast<const unsigned char*>(src);
+  size_t remaining_bytes = size;
+  while (remaining_bytes > 0) {
+    size_t vl = VSETVL_E8M2(remaining_bytes);
+    vuint8m2_t vec = VLE8_V_U8M2(src_ptr, vl);
+    VSE8_V_U8M2(dst_ptr, vec, vl);
+    src_ptr += vl;
+    dst_ptr += vl;
+    remaining_bytes -= vl;
+  }
+#else
+  std::memmove(dst, src, kShortMemCopy);
+  if (SNAPPY_PREDICT_FALSE(size > kShortMemCopy)) {
+    std::memmove(dst + kShortMemCopy,
+                 static_cast<const uint8_t*>(src) + kShortMemCopy,
+                 64 - kShortMemCopy);
+  }
+#endif
+}
+
+#if SNAPPY_IS_X86_64
+SNAPPY_TARGET_SSE42
+template <>
+inline void MemCopy64Tier<DecompressIsaTier::kX86_SSSE3>(char* dst,
+                                                         const void* src,
+                                                         size_t size) {
+  constexpr int kShortMemCopy = 32;
+  (void)kShortMemCopy;
+  assert(size <= 64);
+  assert(std::less_equal<const void*>()(static_cast<const char*>(src) + size,
+                                        dst) ||
+         std::less_equal<const void*>()(dst + size, src));
+  std::memmove(dst, src, kShortMemCopy);
+  if (SNAPPY_PREDICT_FALSE(size > kShortMemCopy)) {
+    std::memmove(dst + kShortMemCopy,
+                 static_cast<const uint8_t*>(src) + kShortMemCopy,
+                 64 - kShortMemCopy);
+  }
+}
+SNAPPY_UNTARGET_REGION
+
+SNAPPY_TARGET_AVX2_BMI2
+template <>
+inline void MemCopy64Tier<DecompressIsaTier::kX86_AVX2_BMI2>(char* dst,
+                                                             const void* src,
+                                                             size_t size) {
+  constexpr int kShortMemCopy = 32;
+  (void)kShortMemCopy;
+  assert(size <= 64);
+  assert(std::less_equal<const void*>()(static_cast<const char*>(src) + size,
+                                        dst) ||
+         std::less_equal<const void*>()(dst + size, src));
+  __m256i data = _mm256_lddqu_si256(static_cast<const __m256i*>(src));
+  _mm256_storeu_si256(reinterpret_cast<__m256i*>(dst), data);
+  if (SNAPPY_PREDICT_FALSE(size > kShortMemCopy)) {
+    data = _mm256_lddqu_si256(static_cast<const __m256i*>(src) + 1);
+    _mm256_storeu_si256(reinterpret_cast<__m256i*>(dst) + 1, data);
+  }
+}
+SNAPPY_UNTARGET_REGION
+#endif  // SNAPPY_IS_X86_64
+
+#if SNAPPY_IS_AARCH64
+template <>
+inline void MemCopy64Tier<DecompressIsaTier::kARM_NEON>(char* dst,
+                                                        const void* src,
+                                                        size_t size) {
+  constexpr int kShortMemCopy = 32;
+  (void)kShortMemCopy;
+  assert(size <= 64);
+  assert(std::less_equal<const void*>()(static_cast<const char*>(src) + size,
+                                        dst) ||
+         std::less_equal<const void*>()(dst + size, src));
+  std::memmove(dst, src, kShortMemCopy);
+  if (SNAPPY_PREDICT_FALSE(size > kShortMemCopy)) {
+    std::memmove(dst + kShortMemCopy,
+                 static_cast<const uint8_t*>(src) + kShortMemCopy,
+                 64 - kShortMemCopy);
+  }
+}
+#endif  // SNAPPY_IS_AARCH64
+
+inline void MemCopy64(char* dst, const void* src, size_t size) {
+  MemCopy64Tier<DecompressIsaTier::kScalar>(dst, src, size);
+}
+
+inline void MemCopy64(ptrdiff_t dst, const void* src, size_t size) {
+  MemCopy64Tier<DecompressIsaTier::kScalar>(dst, src, size);
+}
+
+template <DecompressIsaTier Tier>
+inline bool Copy64BytesWithPatternExtensionTier(char* dst, size_t offset);
+
+template <DecompressIsaTier Tier>
+inline bool Copy64BytesWithPatternExtensionTier(ptrdiff_t dst, size_t offset) {
+  (void)dst;
+  return offset != 0;
+}
+
+inline bool Copy64BytesWithPatternExtensionScalar(char* dst, size_t offset) {
+  if (SNAPPY_PREDICT_TRUE(offset < 16)) {
+    if (SNAPPY_PREDICT_FALSE(offset == 0)) return false;
+    for (int i = 0; i < 16; i++) dst[i] = (dst - offset)[i];
+    static std::array<uint8_t, 16> pattern_sizes = []() {
+      std::array<uint8_t, 16> res;
+      for (int i = 1; i < 16; i++) res[i] = (16 / i + 1) * i;
+      return res;
+    }();
+    offset = pattern_sizes[offset];
+    for (int i = 1; i < 4; i++) {
+      std::memcpy(dst + i * 16, dst + i * 16 - offset, 16);
+    }
+    return true;
+  }
+  for (int i = 0; i < 4; i++) {
+    std::memcpy(dst + i * 16, dst + i * 16 - offset, 16);
+  }
+  return true;
+}
+
+template <>
+inline bool Copy64BytesWithPatternExtensionTier<DecompressIsaTier::kScalar>(
+    char* dst, size_t offset) {
+  return Copy64BytesWithPatternExtensionScalar(dst, offset);
+}
+
 #if SNAPPY_HAVE_VECTOR_BYTE_SHUFFLE
+SNAPPY_ATTRIBUTE_ALWAYS_INLINE
+inline bool Copy64BytesWithPatternExtensionVector(char* dst, size_t offset) {
   if (SNAPPY_PREDICT_TRUE(offset <= 16)) {
     switch (offset) {
       case 0:
         return false;
       case 1: {
-        // TODO: Ideally we should memset, move back once the
-        // codegen issues are fixed.
         V128 pattern = V128_DupChar(dst[-1]);
         for (int i = 0; i < 4; i++) {
           V128_StoreU(reinterpret_cast<V128*>(dst + 16 * i), pattern);
@@ -554,113 +788,127 @@ static inline bool Copy64BytesWithPatternExtension(char* dst, size_t offset) {
       }
     }
   }
-#else
-  if (SNAPPY_PREDICT_TRUE(offset < 16)) {
-    if (SNAPPY_PREDICT_FALSE(offset == 0)) return false;
-    // Extend the pattern to the first 16 bytes.
-    // The simpler formulation of `dst[i - offset]` induces undefined behavior.
-    for (int i = 0; i < 16; i++) dst[i] = (dst - offset)[i];
-    // Find a multiple of pattern >= 16.
-    static std::array<uint8_t, 16> pattern_sizes = []() {
-      std::array<uint8_t, 16> res;
-      for (int i = 1; i < 16; i++) res[i] = (16 / i + 1) * i;
-      return res;
-    }();
-    offset = pattern_sizes[offset];
-    for (int i = 1; i < 4; i++) {
-      std::memcpy(dst + i * 16, dst + i * 16 - offset, 16);
-    }
-    return true;
-  }
-#endif  // SNAPPY_HAVE_VECTOR_BYTE_SHUFFLE
-
-  // Very rare.
   for (int i = 0; i < 4; i++) {
     std::memcpy(dst + i * 16, dst + i * 16 - offset, 16);
   }
   return true;
 }
+#endif  // SNAPPY_HAVE_VECTOR_BYTE_SHUFFLE
 
-// Copy [src, src+(op_limit-op)) to [op, op_limit) but faster than
-// IncrementalCopySlow. buf_limit is the address past the end of the writable
-// region of the buffer.
-inline char* IncrementalCopy(const char* src, char* op, char* const op_limit,
-                             char* const buf_limit) {
-#if SNAPPY_HAVE_VECTOR_BYTE_SHUFFLE
-  constexpr int big_pattern_size_lower_bound = 16;
-#else
+#if SNAPPY_IS_X86_64
+SNAPPY_TARGET_SSE42
+template <>
+inline bool Copy64BytesWithPatternExtensionTier<DecompressIsaTier::kX86_SSSE3>(
+    char* dst, size_t offset) {
+  return Copy64BytesWithPatternExtensionVector(dst, offset);
+}
+SNAPPY_UNTARGET_REGION
+
+SNAPPY_TARGET_AVX2_BMI2
+template <>
+inline bool
+Copy64BytesWithPatternExtensionTier<DecompressIsaTier::kX86_AVX2_BMI2>(
+    char* dst, size_t offset) {
+  return Copy64BytesWithPatternExtensionVector(dst, offset);
+}
+SNAPPY_UNTARGET_REGION
+#endif  // SNAPPY_IS_X86_64
+
+#if SNAPPY_IS_AARCH64
+template <>
+inline bool Copy64BytesWithPatternExtensionTier<DecompressIsaTier::kARM_NEON>(
+    char* dst, size_t offset) {
+  return Copy64BytesWithPatternExtensionVector(dst, offset);
+}
+#endif  // SNAPPY_IS_AARCH64
+
+inline bool Copy64BytesWithPatternExtension(char* dst, size_t offset) {
+  return Copy64BytesWithPatternExtensionTier<DecompressIsaTier::kScalar>(
+      dst, offset);
+}
+
+inline bool Copy64BytesWithPatternExtension(ptrdiff_t dst, size_t offset) {
+  return Copy64BytesWithPatternExtensionTier<DecompressIsaTier::kScalar>(
+      dst, offset);
+}
+
+template <DecompressIsaTier Tier>
+inline char* IncrementalCopyTier(const char* src, char* op,
+                                 char* const op_limit, char* const buf_limit);
+
+template <>
+inline char* IncrementalCopyTier<DecompressIsaTier::kScalar>(
+    const char* src, char* op, char* const op_limit, char* const buf_limit) {
   constexpr int big_pattern_size_lower_bound = 8;
-#endif
-
-  // Terminology:
-  //
-  // slop = buf_limit - op
-  // pat  = op - src
-  // len  = op_limit - op
   assert(src < op);
   assert(op < op_limit);
   assert(op_limit <= buf_limit);
-  // NOTE: The copy tags use 3 or 6 bits to store the copy length, so len <= 64.
   assert(op_limit - op <= 64);
-  // NOTE: In practice the compressor always emits len >= 4, so it is ok to
-  // assume that to optimize this function, but this is not guaranteed by the
-  // compression format, so we have to also handle len < 4 in case the input
-  // does not satisfy these conditions.
 
   size_t pattern_size = op - src;
-  // The cases are split into different branches to allow the branch predictor,
-  // FDO, and static prediction hints to work better. For each input we list the
-  // ratio of invocations that match each condition.
-  //
-  // input        slop < 16   pat < 8  len > 16
-  // ------------------------------------------
-  // html|html4|cp   0%         1.01%    27.73%
-  // urls            0%         0.88%    14.79%
-  // jpg             0%        64.29%     7.14%
-  // pdf             0%         2.56%    58.06%
-  // txt[1-4]        0%         0.23%     0.97%
-  // pb              0%         0.96%    13.88%
-  // bin             0.01%     22.27%    41.17%
-  //
-  // It is very rare that we don't have enough slop for doing block copies. It
-  // is also rare that we need to expand a pattern. Small patterns are common
-  // for incompressible formats and for those we are plenty fast already.
-  // Lengths are normally not greater than 16 but they vary depending on the
-  // input. In general if we always predict len <= 16 it would be an ok
-  // prediction.
-  //
-  // In order to be fast we want a pattern >= 16 bytes (or 8 bytes in non-SSE)
-  // and an unrolled loop copying 1x 16 bytes (or 2x 8 bytes in non-SSE) at a
-  // time.
-
-  // Handle the uncommon case where pattern is less than 16 (or 8 in non-SSE)
-  // bytes.
   if (pattern_size < big_pattern_size_lower_bound) {
-#if SNAPPY_HAVE_VECTOR_BYTE_SHUFFLE
-    // Load the first eight bytes into an 128-bit XMM register, then use PSHUFB
-    // to permute the register's contents in-place into a repeating sequence of
-    // the first "pattern_size" bytes.
-    // For example, suppose:
-    //    src       == "abc"
-    //    op        == op + 3
-    // After V128_Shuffle(), "pattern" will have five copies of "abc"
-    // followed by one byte of slop: abcabcabcabcabca.
-    //
-    // The non-SSE fallback implementation suffers from store-forwarding stalls
-    // because its loads and stores partly overlap. By expanding the pattern
-    // in-place, we avoid the penalty.
+    if (SNAPPY_PREDICT_TRUE(op <= buf_limit - 11)) {
+      while (pattern_size < 8) {
+        UnalignedCopy64(src, op);
+        op += pattern_size;
+        pattern_size *= 2;
+      }
+      if (SNAPPY_PREDICT_TRUE(op >= op_limit)) return op_limit;
+    } else {
+      return IncrementalCopySlow(src, op, op_limit);
+    }
+  }
+  assert(pattern_size >= big_pattern_size_lower_bound);
+  constexpr bool use_16bytes_chunk = false;
 
-    // Typically, the op_limit is the gating factor so try to simplify the loop
-    // based on that.
+  if (SNAPPY_PREDICT_TRUE(op_limit <= buf_limit - 15)) {
+    ConditionalUnalignedCopy128<use_16bytes_chunk>(src, op);
+    if (op + 16 < op_limit) {
+      ConditionalUnalignedCopy128<use_16bytes_chunk>(src + 16, op + 16);
+    }
+    if (op + 32 < op_limit) {
+      ConditionalUnalignedCopy128<use_16bytes_chunk>(src + 32, op + 32);
+    }
+    if (op + 48 < op_limit) {
+      ConditionalUnalignedCopy128<use_16bytes_chunk>(src + 48, op + 48);
+    }
+    return op_limit;
+  }
+
+#ifdef __clang__
+#pragma clang loop unroll(disable)
+#endif
+  for (char* op_end = buf_limit - 16; op < op_end; op += 16, src += 16) {
+    ConditionalUnalignedCopy128<use_16bytes_chunk>(src, op);
+  }
+  if (op >= op_limit) return op_limit;
+
+  if (SNAPPY_PREDICT_FALSE(op <= buf_limit - 8)) {
+    UnalignedCopy64(src, op);
+    src += 8;
+    op += 8;
+  }
+  return IncrementalCopySlow(src, op, op_limit);
+}
+
+#if SNAPPY_HAVE_VECTOR_BYTE_SHUFFLE
+SNAPPY_ATTRIBUTE_ALWAYS_INLINE
+inline char* IncrementalCopyVector(const char* src, char* op,
+                                   char* const op_limit,
+                                   char* const buf_limit) {
+  constexpr int big_pattern_size_lower_bound = 16;
+  assert(src < op);
+  assert(op < op_limit);
+  assert(op_limit <= buf_limit);
+  assert(op_limit - op <= 64);
+
+  size_t pattern_size = op - src;
+  if (pattern_size < big_pattern_size_lower_bound) {
     if (SNAPPY_PREDICT_TRUE(op_limit <= buf_limit - 15)) {
       auto pattern_and_reshuffle_mask =
           LoadPatternAndReshuffleMask(src, pattern_size);
       V128 pattern = pattern_and_reshuffle_mask.first;
       V128 reshuffle_mask = pattern_and_reshuffle_mask.second;
-      // There is at least one, and at most four 16-byte blocks. Writing four
-      // conditionals instead of a loop allows FDO to layout the code with
-      // respect to the actual probabilities of each length.
-      // TODO: Replace with loop with trip count hint.
       V128_StoreU(reinterpret_cast<V128*>(op), pattern);
 
       if (op + 16 < op_limit) {
@@ -683,11 +931,6 @@ inline char* IncrementalCopy(const char* src, char* op, char* const op_limit,
           LoadPatternAndReshuffleMask(src, pattern_size);
       V128 pattern = pattern_and_reshuffle_mask.first;
       V128 reshuffle_mask = pattern_and_reshuffle_mask.second;
-      // This code path is relatively cold however so we save code size
-      // by avoiding unrolling and vectorizing.
-      //
-      // TODO: Remove pragma when when cold regions don't get
-      // vectorized or unrolled.
 #ifdef __clang__
 #pragma clang loop unroll(disable)
 #endif
@@ -698,40 +941,11 @@ inline char* IncrementalCopy(const char* src, char* op, char* const op_limit,
       } while (SNAPPY_PREDICT_TRUE(op < op_end));
     }
     return IncrementalCopySlow(op - pattern_size, op, op_limit);
-#else   // !SNAPPY_HAVE_VECTOR_BYTE_SHUFFLE
-    // If plenty of buffer space remains, expand the pattern to at least 8
-    // bytes. The way the following loop is written, we need 8 bytes of buffer
-    // space if pattern_size >= 4, 11 bytes if pattern_size is 1 or 3, and 10
-    // bytes if pattern_size is 2.  Precisely encoding that is probably not
-    // worthwhile; instead, invoke the slow path if we cannot write 11 bytes
-    // (because 11 are required in the worst case).
-    if (SNAPPY_PREDICT_TRUE(op <= buf_limit - 11)) {
-      while (pattern_size < 8) {
-        UnalignedCopy64(src, op);
-        op += pattern_size;
-        pattern_size *= 2;
-      }
-      if (SNAPPY_PREDICT_TRUE(op >= op_limit)) return op_limit;
-    } else {
-      return IncrementalCopySlow(src, op, op_limit);
-    }
-#endif  // SNAPPY_HAVE_VECTOR_BYTE_SHUFFLE
   }
   assert(pattern_size >= big_pattern_size_lower_bound);
-  constexpr bool use_16bytes_chunk = big_pattern_size_lower_bound == 16;
+  constexpr bool use_16bytes_chunk = true;
 
-  // Copy 1x 16 bytes (or 2x 8 bytes in non-SSE) at a time. Because op - src can
-  // be < 16 in non-SSE, a single UnalignedCopy128 might overwrite data in op.
-  // UnalignedCopy64 is safe because expanding the pattern to at least 8 bytes
-  // guarantees that op - src >= 8.
-  //
-  // Typically, the op_limit is the gating factor so try to simplify the loop
-  // based on that.
   if (SNAPPY_PREDICT_TRUE(op_limit <= buf_limit - 15)) {
-    // There is at least one, and at most four 16-byte blocks. Writing four
-    // conditionals instead of a loop allows FDO to layout the code with respect
-    // to the actual probabilities of each length.
-    // TODO: Replace with loop with trip count hint.
     ConditionalUnalignedCopy128<use_16bytes_chunk>(src, op);
     if (op + 16 < op_limit) {
       ConditionalUnalignedCopy128<use_16bytes_chunk>(src + 16, op + 16);
@@ -745,12 +959,6 @@ inline char* IncrementalCopy(const char* src, char* op, char* const op_limit,
     return op_limit;
   }
 
-  // Fall back to doing as much as we can with the available slop in the
-  // buffer. This code path is relatively cold however so we save code size by
-  // avoiding unrolling and vectorizing.
-  //
-  // TODO: Remove pragma when when cold regions don't get vectorized
-  // or unrolled.
 #ifdef __clang__
 #pragma clang loop unroll(disable)
 #endif
@@ -759,8 +967,6 @@ inline char* IncrementalCopy(const char* src, char* op, char* const op_limit,
   }
   if (op >= op_limit) return op_limit;
 
-  // We only take this branch if we didn't have enough slop and we can do a
-  // single 8 byte copy.
   if (SNAPPY_PREDICT_FALSE(op <= buf_limit - 8)) {
     UnalignedCopy64(src, op);
     src += 8;
@@ -768,8 +974,39 @@ inline char* IncrementalCopy(const char* src, char* op, char* const op_limit,
   }
   return IncrementalCopySlow(src, op, op_limit);
 }
+#endif  // SNAPPY_HAVE_VECTOR_BYTE_SHUFFLE
 
-}  // namespace
+#if SNAPPY_IS_X86_64
+SNAPPY_TARGET_SSE42
+template <>
+inline char* IncrementalCopyTier<DecompressIsaTier::kX86_SSSE3>(
+    const char* src, char* op, char* const op_limit, char* const buf_limit) {
+  return IncrementalCopyVector(src, op, op_limit, buf_limit);
+}
+SNAPPY_UNTARGET_REGION
+
+SNAPPY_TARGET_AVX2_BMI2
+template <>
+inline char* IncrementalCopyTier<DecompressIsaTier::kX86_AVX2_BMI2>(
+    const char* src, char* op, char* const op_limit, char* const buf_limit) {
+  return IncrementalCopyVector(src, op, op_limit, buf_limit);
+}
+SNAPPY_UNTARGET_REGION
+#endif  // SNAPPY_IS_X86_64
+
+#if SNAPPY_IS_AARCH64
+template <>
+inline char* IncrementalCopyTier<DecompressIsaTier::kARM_NEON>(
+    const char* src, char* op, char* const op_limit, char* const buf_limit) {
+  return IncrementalCopyVector(src, op, op_limit, buf_limit);
+}
+#endif  // SNAPPY_IS_AARCH64
+
+inline char* IncrementalCopy(const char* src, char* op, char* const op_limit,
+                             char* const buf_limit) {
+  return IncrementalCopyTier<DecompressIsaTier::kScalar>(src, op, op_limit,
+                                                         buf_limit);
+}
 
 template <bool allow_fast_path>
 static inline char* EmitLiteral(char* op, const char* literal, int len) {
@@ -1424,19 +1661,6 @@ static inline void Report(int token, const char* algorithm,
 //   bool TryFastAppend(const char* ip, size_t available, size_t length, T* op);
 // };
 
-static inline uint32_t ExtractLowBytes(const uint32_t& v, int n) {
-  assert(n >= 0);
-  assert(n <= 4);
-#if SNAPPY_HAVE_BMI2
-  return _bzhi_u32(v, 8 * n);
-#else
-  // This needs to be wider than uint32_t otherwise `mask << 32` will be
-  // undefined.
-  uint64_t mask = 0xffffffff;
-  return v & ~(mask << (8 * n));
-#endif
-}
-
 static inline bool LeftShiftOverflows(uint8_t value, uint32_t shift) {
   assert(shift < 32);
   static const uint8_t masks[] = {
@@ -1445,77 +1669,6 @@ static inline bool LeftShiftOverflows(uint8_t value, uint32_t shift) {
       0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,  //
       0x00, 0x80, 0xc0, 0xe0, 0xf0, 0xf8, 0xfc, 0xfe};
   return (value & masks[shift]) != 0;
-}
-
-inline bool Copy64BytesWithPatternExtension(ptrdiff_t dst, size_t offset) {
-  // TODO: Switch to [[maybe_unused]] when we can assume C++17.
-  (void)dst;
-  return offset != 0;
-}
-
-// Copies between size bytes and 64 bytes from src to dest.  size cannot exceed
-// 64.  More than size bytes, but never exceeding 64, might be copied if doing
-// so gives better performance.  [src, src + size) must not overlap with
-// [dst, dst + size), but [src, src + 64) may overlap with [dst, dst + 64).
-void MemCopy64(char* dst, const void* src, size_t size) {
-  // Always copy this many bytes.  If that's below size then copy the full 64.
-  constexpr int kShortMemCopy = 32;
-  (void)kShortMemCopy;
-  assert(size <= 64);
-  assert(std::less_equal<const void*>()(static_cast<const char*>(src) + size,
-                                        dst) ||
-         std::less_equal<const void*>()(dst + size, src));
-
-  // We know that src and dst are at least size bytes apart. However, because we
-  // might copy more than size bytes the copy still might overlap past size.
-  // E.g. if src and dst appear consecutively in memory (src + size >= dst).
-  // TODO: Investigate wider copies on other platforms.
-#if defined(__x86_64__) && defined(__AVX__)
-  assert(kShortMemCopy <= 32);
-  __m256i data = _mm256_lddqu_si256(static_cast<const __m256i*>(src));
-  _mm256_storeu_si256(reinterpret_cast<__m256i*>(dst), data);
-  // Profiling shows that nearly all copies are short.
-  if (SNAPPY_PREDICT_FALSE(size > kShortMemCopy)) {
-    data = _mm256_lddqu_si256(static_cast<const __m256i*>(src) + 1);
-    _mm256_storeu_si256(reinterpret_cast<__m256i*>(dst) + 1, data);
-  }
-  // RVV acceleration available on RISC-V when compiled with -march=rv64gcv
-#elif defined(__riscv) && SNAPPY_HAVE_RVV
-  // Cast pointers to the type we will operate on.
-  unsigned char* dst_ptr = reinterpret_cast<unsigned char*>(dst);
-  const unsigned char* src_ptr = reinterpret_cast<const unsigned char*>(src);
-  size_t remaining_bytes = size;
-  // Loop as long as there are bytes remaining to be copied.
-  while (remaining_bytes > 0) {
-    // Set vector configuration: e8 (8-bit elements), m2 (LMUL=2).
-    // Use e8m2 configuration to maximize throughput.
-    size_t vl = VSETVL_E8M2(remaining_bytes);
-    // Load data from the current source pointer.
-    vuint8m2_t vec = VLE8_V_U8M2(src_ptr, vl);
-    // Store data to the current destination pointer.
-    VSE8_V_U8M2(dst_ptr, vec, vl);
-    // Update pointers and the remaining count.
-    src_ptr += vl;
-    dst_ptr += vl;
-    remaining_bytes -= vl;
-  }
-
-#else
-  std::memmove(dst, src, kShortMemCopy);
-  // Profiling shows that nearly all copies are short.
-  if (SNAPPY_PREDICT_FALSE(size > kShortMemCopy)) {
-    std::memmove(dst + kShortMemCopy,
-                 static_cast<const uint8_t*>(src) + kShortMemCopy,
-                 64 - kShortMemCopy);
-  }
-#endif
-}
-
-void MemCopy64(ptrdiff_t dst, const void* src, size_t size) {
-  // TODO: Switch to [[maybe_unused]] when we can assume C++17.
-  (void)dst;
-  (void)src;
-  (void)size;
 }
 
 void ClearDeferred(const void** deferred_src, size_t* deferred_length,
@@ -1664,10 +1817,10 @@ inline uint32_t ExtractOffset(uint32_t val, size_t tag_type) {
 // TODO This function probably does not need to be inlined, as it
 // should decode large chunks at a time. This allows runtime dispatch to
 // implementations based on CPU capability (BMI2 / perhaps 32 / 64 byte memcpy).
-template <typename T>
-std::pair<const uint8_t*, ptrdiff_t> DecompressBranchless(
-    const uint8_t* ip, const uint8_t* ip_limit, ptrdiff_t op, T op_base,
-    ptrdiff_t op_limit_min_slop) {
+template <DecompressIsaTier Tier, typename T>
+SNAPPY_ATTRIBUTE_ALWAYS_INLINE inline std::pair<const uint8_t*, ptrdiff_t>
+DecompressBranchlessImpl(const uint8_t* ip, const uint8_t* ip_limit,
+                         ptrdiff_t op, T op_base, ptrdiff_t op_limit_min_slop) {
   // If deferred_src is invalid point it here.
   uint8_t safe_source[64];
   const void* deferred_src;
@@ -1736,11 +1889,11 @@ std::pair<const uint8_t*, ptrdiff_t> DecompressBranchless(
           std::ptrdiff_t delta = (op + deferred_length) + len_min_offset - len;
           // Guard against copies before the buffer start.
           // Execute any deferred MemCopy since we write to dst here.
-          MemCopy64(op_base + op, deferred_src, deferred_length);
+          MemCopy64Tier<Tier>(op_base + op, deferred_src, deferred_length);
           op += deferred_length;
           ClearDeferred(&deferred_src, &deferred_length, safe_source);
           if (SNAPPY_PREDICT_FALSE(delta < 0 ||
-                                   !Copy64BytesWithPatternExtension(
+                                   !Copy64BytesWithPatternExtensionTier<Tier>(
                                        op_base + op, len - len_min_offset))) {
             goto break_loop;
           }
@@ -1753,7 +1906,7 @@ std::pair<const uint8_t*, ptrdiff_t> DecompressBranchless(
           // Due to the spurious offset in literals have this will trigger
           // at the start of a block when op is still smaller than 256.
           if (tag_type != 0) goto break_loop;
-          MemCopy64(op_base + op, deferred_src, deferred_length);
+          MemCopy64Tier<Tier>(op_base + op, deferred_src, deferred_length);
           op += deferred_length;
           DeferMemCopy(&deferred_src, &deferred_length, old_ip, len);
           continue;
@@ -1763,7 +1916,7 @@ std::pair<const uint8_t*, ptrdiff_t> DecompressBranchless(
         // we need to copy from ip instead of from the stream.
         const void* from =
             tag_type ? reinterpret_cast<void*>(op_base + delta) : old_ip;
-        MemCopy64(op_base + op, deferred_src, deferred_length);
+        MemCopy64Tier<Tier>(op_base + op, deferred_src, deferred_length);
         op += deferred_length;
         DeferMemCopy(&deferred_src, &deferred_length, from, len);
       }
@@ -1776,11 +1929,20 @@ std::pair<const uint8_t*, ptrdiff_t> DecompressBranchless(
   // If we deferred a copy then we can perform.  If we are up to date then we
   // might not have enough slop bytes and could run past the end.
   if (deferred_length) {
-    MemCopy64(op_base + op, deferred_src, deferred_length);
+    MemCopy64Tier<Tier>(op_base + op, deferred_src, deferred_length);
     op += deferred_length;
     ClearDeferred(&deferred_src, &deferred_length, safe_source);
   }
+  MaybeZeroUpperTier<Tier>();
   return {ip, op};
+}
+
+template <typename T>
+inline std::pair<const uint8_t*, ptrdiff_t> DecompressBranchless(
+    const uint8_t* ip, const uint8_t* ip_limit, ptrdiff_t op, T op_base,
+    ptrdiff_t op_limit_min_slop) {
+  return DecompressBranchlessImpl<DecompressIsaTier::kScalar>(
+      ip, ip_limit, op, op_base, op_limit_min_slop);
 }
 
 // Helper class for decompression
@@ -1846,141 +2008,247 @@ class SnappyDecompressor {
     return true;
   }
 
-  // Process the next item found in the input.
-  // Returns true if successful, false on error or end of input.
+  template <DecompressIsaTier Tier>
+  friend struct DecompressAllTagsImplStruct;
+
   template <class Writer>
-#if defined(__GNUC__) && defined(__x86_64__)
-  __attribute__((aligned(32)))
+  void DecompressAllTags_Scalar(Writer* writer);
+
+#if SNAPPY_IS_X86_64
+  template <class Writer>
+  void DecompressAllTags_SSSE3(Writer* writer);
+
+  template <class Writer>
+  void DecompressAllTags_AVX2_BMI2(Writer* writer);
 #endif
-  void DecompressAllTags(Writer* writer) {
-    const char* ip = ip_;
-    ResetLimit(ip);
-    auto op = writer->GetOutputPtr();
-    // We could have put this refill fragment only at the beginning of the loop.
-    // However, duplicating it at the end of each branch gives the compiler more
-    // scope to optimize the <ip_limit_ - ip> expression based on the local
-    // context, which overall increases speed.
-#define MAYBE_REFILL()                                       \
-  if (SNAPPY_PREDICT_FALSE(ip >= ip_limit_min_maxtaglen_)) { \
-    ip_ = ip;                                                \
-    if (SNAPPY_PREDICT_FALSE(!RefillTag())) goto exit;       \
-    ip = ip_;                                                \
-    ResetLimit(ip);                                          \
-  }                                                          \
-  preload = static_cast<uint8_t>(*ip)
 
-    // At the start of the for loop below the least significant byte of preload
-    // contains the tag.
-    uint32_t preload;
-    MAYBE_REFILL();
-    for (;;) {
-      {
-        ptrdiff_t op_limit_min_slop;
-        auto op_base = writer->GetBase(&op_limit_min_slop);
-        if (op_base) {
-          auto res =
-              DecompressBranchless(reinterpret_cast<const uint8_t*>(ip),
-                                   reinterpret_cast<const uint8_t*>(ip_limit_),
-                                   op - op_base, op_base, op_limit_min_slop);
-          ip = reinterpret_cast<const char*>(res.first);
-          op = op_base + res.second;
-          MAYBE_REFILL();
-        }
-      }
-      const uint8_t c = static_cast<uint8_t>(preload);
-      ip++;
+#if SNAPPY_IS_AARCH64
+  template <class Writer>
+  void DecompressAllTags_ARM_NEON(Writer* writer);
+#endif
 
-      // Ratio of iterations that have LITERAL vs non-LITERAL for different
-      // inputs.
-      //
-      // input          LITERAL  NON_LITERAL
-      // -----------------------------------
-      // html|html4|cp   23%        77%
-      // urls            36%        64%
-      // jpg             47%        53%
-      // pdf             19%        81%
-      // txt[1-4]        25%        75%
-      // pb              24%        76%
-      // bin             24%        76%
-      if (SNAPPY_PREDICT_FALSE((c & 0x3) == LITERAL)) {
-        uint64_t literal_length = (c >> 2) + 1u;
-        if (writer->TryFastAppend(ip, ip_limit_ - ip,
-                                  static_cast<size_t>(literal_length), &op)) {
-          assert(literal_length < 61);
-          ip += static_cast<size_t>(literal_length);
-          // NOTE: There is no MAYBE_REFILL() here, as TryFastAppend()
-          // will not return true unless there's already at least five spare
-          // bytes in addition to the literal.
-          preload = static_cast<uint8_t>(*ip);
-          continue;
-        }
-        if (SNAPPY_PREDICT_FALSE(literal_length >= 61)) {
-          // Long literal.
-          const size_t literal_length_length =
-              static_cast<size_t>(literal_length - 60);
-          // NOTE: literal_length might be equal 2^32 (i.e. ExtractLowBytes
-          // returns 0xFFFFFFFF); this is implicitly invalid stream (since
-          // uncompressed length is capped with 0xFFFFFFFF); for performance we
-          // do not check for this case here.
-          literal_length =
-              static_cast<uint64_t>(ExtractLowBytes(LittleEndian::Load32(ip),
-                                                    literal_length_length)) +
-              uint64_t{1};
-          ip += literal_length_length;
-        }
+  template <class Writer>
+  void DecompressAllTags(Writer* writer);
+};
 
-        size_t avail = ip_limit_ - ip;
-        while (avail < literal_length) {
-          if (!writer->Append(ip, avail, &op)) goto exit;
-          literal_length -= avail;
-          reader_->Skip(peeked_);
-          size_t n;
-          ip = reader_->Peek(&n);
-          avail = n;
-          peeked_ = avail;
-          if (avail == 0) goto exit;
-          ip_limit_ = ip + avail;
-          ResetLimit(ip);
-        }
-        if (!writer->Append(ip, static_cast<size_t>(literal_length), &op)) {
-          goto exit;
-        }
-        ip += static_cast<size_t>(literal_length);
-        MAYBE_REFILL();
-      } else {
-        if (SNAPPY_PREDICT_FALSE((c & 3) == COPY_4_BYTE_OFFSET)) {
-          const size_t copy_offset = LittleEndian::Load32(ip);
-          const size_t length = (c >> 2) + 1;
-          ip += 4;
+template <DecompressIsaTier Tier>
+struct DecompressAllTagsImplStruct;
 
-          if (!writer->AppendFromSelf(copy_offset, length, &op)) goto exit;
-        } else {
-          const ptrdiff_t entry = kLengthMinusOffset[c];
-          preload = LittleEndian::Load32(ip);
-          const uint32_t trailer = ExtractLowBytes(preload, c & 3);
-          const uint32_t length = entry & 0xff;
-          assert(length > 0);
+#define SNAPPY_DECOMPRESS_ALL_TAGS_BODY(Tier)                                  \
+  const char* ip = decompressor->ip_;                                          \
+  decompressor->ResetLimit(ip);                                                \
+  auto op = writer->GetOutputPtr();                                            \
+  do {                                                                         \
+    uint32_t preload;                                                          \
+    if (SNAPPY_PREDICT_FALSE(ip >= decompressor->ip_limit_min_maxtaglen_)) {   \
+      decompressor->ip_ = ip;                                                  \
+      if (SNAPPY_PREDICT_FALSE(!decompressor->RefillTag())) goto exit;         \
+      ip = decompressor->ip_;                                                  \
+      decompressor->ResetLimit(ip);                                            \
+    }                                                                          \
+    preload = static_cast<uint8_t>(*ip);                                       \
+    for (;;) {                                                                 \
+      {                                                                        \
+        ptrdiff_t op_limit_min_slop;                                           \
+        auto op_base = writer->GetBase(&op_limit_min_slop);                    \
+        if (op_base) {                                                         \
+          auto res = DecompressBranchlessImpl<Tier>(                           \
+              reinterpret_cast<const uint8_t*>(ip),                            \
+              reinterpret_cast<const uint8_t*>(decompressor->ip_limit_),       \
+              op - op_base, op_base, op_limit_min_slop);                       \
+          ip = reinterpret_cast<const char*>(res.first);                       \
+          op = op_base + res.second;                                           \
+          if (SNAPPY_PREDICT_FALSE(ip >=                                       \
+                                   decompressor->ip_limit_min_maxtaglen_)) {   \
+            decompressor->ip_ = ip;                                            \
+            if (SNAPPY_PREDICT_FALSE(!decompressor->RefillTag())) goto exit;   \
+            ip = decompressor->ip_;                                            \
+            decompressor->ResetLimit(ip);                                      \
+          }                                                                    \
+          preload = static_cast<uint8_t>(*ip);                                 \
+        }                                                                      \
+      }                                                                        \
+      const uint8_t c = static_cast<uint8_t>(preload);                         \
+      ip++;                                                                    \
+      if (SNAPPY_PREDICT_FALSE((c & 0x3) == LITERAL)) {                        \
+        uint64_t literal_length = (c >> 2) + 1u;                               \
+        if (writer->TryFastAppend(ip, decompressor->ip_limit_ - ip,            \
+                                  static_cast<size_t>(literal_length), &op)) { \
+          assert(literal_length < 61);                                         \
+          ip += static_cast<size_t>(literal_length);                           \
+          preload = static_cast<uint8_t>(*ip);                                 \
+          continue;                                                            \
+        }                                                                      \
+        if (SNAPPY_PREDICT_FALSE(literal_length >= 61)) {                      \
+          const size_t literal_length_length =                                 \
+              static_cast<size_t>(literal_length - 60);                        \
+          literal_length =                                                     \
+              static_cast<uint64_t>(ExtractLowBytesTier<Tier>(                 \
+                  LittleEndian::Load32(ip), literal_length_length)) +          \
+              uint64_t{1};                                                     \
+          ip += literal_length_length;                                         \
+        }                                                                      \
+        size_t avail = decompressor->ip_limit_ - ip;                           \
+        while (avail < literal_length) {                                       \
+          if (!writer->Append(ip, avail, &op)) goto exit;                      \
+          literal_length -= avail;                                             \
+          decompressor->reader_->Skip(decompressor->peeked_);                  \
+          size_t n;                                                            \
+          ip = decompressor->reader_->Peek(&n);                                \
+          avail = n;                                                           \
+          decompressor->peeked_ = avail;                                       \
+          if (avail == 0) goto exit;                                           \
+          decompressor->ip_limit_ = ip + avail;                                \
+          decompressor->ResetLimit(ip);                                        \
+        }                                                                      \
+        if (!writer->Append(ip, static_cast<size_t>(literal_length), &op)) {   \
+          goto exit;                                                           \
+        }                                                                      \
+        ip += static_cast<size_t>(literal_length);                             \
+        if (SNAPPY_PREDICT_FALSE(ip >=                                         \
+                                 decompressor->ip_limit_min_maxtaglen_)) {     \
+          decompressor->ip_ = ip;                                              \
+          if (SNAPPY_PREDICT_FALSE(!decompressor->RefillTag())) goto exit;     \
+          ip = decompressor->ip_;                                              \
+          decompressor->ResetLimit(ip);                                        \
+        }                                                                      \
+        preload = static_cast<uint8_t>(*ip);                                   \
+      } else {                                                                 \
+        if (SNAPPY_PREDICT_FALSE((c & 3) == COPY_4_BYTE_OFFSET)) {             \
+          const size_t copy_offset = LittleEndian::Load32(ip);                 \
+          const size_t length = (c >> 2) + 1;                                  \
+          ip += 4;                                                             \
+          if (!writer->template AppendFromSelf<Tier>(copy_offset, length,      \
+                                                     &op))                     \
+            goto exit;                                                         \
+        } else {                                                               \
+          const ptrdiff_t entry = kLengthMinusOffset[c];                       \
+          preload = LittleEndian::Load32(ip);                                  \
+          const uint32_t trailer = ExtractLowBytesTier<Tier>(preload, c & 3);  \
+          const uint32_t length = entry & 0xff;                                \
+          assert(length > 0);                                                  \
+          const uint32_t copy_offset = trailer - entry + length;               \
+          if (!writer->template AppendFromSelf<Tier>(copy_offset, length,      \
+                                                     &op))                     \
+            goto exit;                                                         \
+          ip += (c & 3);                                                       \
+          preload >>= (c & 3) * 8;                                             \
+          if (ip < decompressor->ip_limit_min_maxtaglen_) continue;            \
+        }                                                                      \
+        if (SNAPPY_PREDICT_FALSE(ip >=                                         \
+                                 decompressor->ip_limit_min_maxtaglen_)) {     \
+          decompressor->ip_ = ip;                                              \
+          if (SNAPPY_PREDICT_FALSE(!decompressor->RefillTag())) goto exit;     \
+          ip = decompressor->ip_;                                              \
+          decompressor->ResetLimit(ip);                                        \
+        }                                                                      \
+        preload = static_cast<uint8_t>(*ip);                                   \
+      }                                                                        \
+    }                                                                          \
+  } while (false);                                                             \
+  exit:                                                                        \
+  writer->SetOutputPtr(op);                                                    \
+  MaybeZeroUpperTier<Tier>();
 
-          // copy_offset/256 is encoded in bits 8..10.  By just fetching
-          // those bits, we get copy_offset (since the bit-field starts at
-          // bit 8).
-          const uint32_t copy_offset = trailer - entry + length;
-          if (!writer->AppendFromSelf(copy_offset, length, &op)) goto exit;
-
-          ip += (c & 3);
-          // By using the result of the previous load we reduce the critical
-          // dependency chain of ip to 4 cycles.
-          preload >>= (c & 3) * 8;
-          if (ip < ip_limit_min_maxtaglen_) continue;
-        }
-        MAYBE_REFILL();
-      }
-    }
-#undef MAYBE_REFILL
-  exit:
-    writer->SetOutputPtr(op);
+template <>
+struct DecompressAllTagsImplStruct<DecompressIsaTier::kScalar> {
+  template <class Writer>
+  SNAPPY_ATTRIBUTE_ALWAYS_INLINE static void Run(
+      SnappyDecompressor* decompressor, Writer* writer) {
+    SNAPPY_DECOMPRESS_ALL_TAGS_BODY(DecompressIsaTier::kScalar)
   }
 };
+
+#if SNAPPY_IS_X86_64
+SNAPPY_TARGET_SSE42
+template <>
+struct DecompressAllTagsImplStruct<DecompressIsaTier::kX86_SSSE3> {
+  template <class Writer>
+  SNAPPY_ATTRIBUTE_ALWAYS_INLINE static void Run(
+      SnappyDecompressor* decompressor, Writer* writer) {
+    SNAPPY_DECOMPRESS_ALL_TAGS_BODY(DecompressIsaTier::kX86_SSSE3)
+  }
+};
+SNAPPY_UNTARGET_REGION
+
+SNAPPY_TARGET_AVX2_BMI2
+template <>
+struct DecompressAllTagsImplStruct<DecompressIsaTier::kX86_AVX2_BMI2> {
+  template <class Writer>
+  SNAPPY_ATTRIBUTE_ALWAYS_INLINE static void Run(
+      SnappyDecompressor* decompressor, Writer* writer) {
+    SNAPPY_DECOMPRESS_ALL_TAGS_BODY(DecompressIsaTier::kX86_AVX2_BMI2)
+  }
+};
+SNAPPY_UNTARGET_REGION
+#endif  // SNAPPY_IS_X86_64
+
+#if SNAPPY_IS_AARCH64
+template <>
+struct DecompressAllTagsImplStruct<DecompressIsaTier::kARM_NEON> {
+  template <class Writer>
+  SNAPPY_ATTRIBUTE_ALWAYS_INLINE static void Run(
+      SnappyDecompressor* decompressor, Writer* writer) {
+    SNAPPY_DECOMPRESS_ALL_TAGS_BODY(DecompressIsaTier::kARM_NEON)
+  }
+};
+#endif  // SNAPPY_IS_AARCH64
+
+template <class Writer>
+SNAPPY_ATTRIBUTE_NOINLINE void SnappyDecompressor::DecompressAllTags_Scalar(
+    Writer* writer) {
+  DecompressAllTagsImplStruct<DecompressIsaTier::kScalar>::Run(this, writer);
+}
+
+#if SNAPPY_IS_X86_64
+SNAPPY_TARGET_SSE42
+template <class Writer>
+SNAPPY_ATTRIBUTE_NOINLINE void SnappyDecompressor::DecompressAllTags_SSSE3(
+    Writer* writer) {
+  DecompressAllTagsImplStruct<DecompressIsaTier::kX86_SSSE3>::Run(this, writer);
+}
+SNAPPY_UNTARGET_REGION
+
+SNAPPY_TARGET_AVX2_BMI2
+template <class Writer>
+SNAPPY_ATTRIBUTE_NOINLINE void SnappyDecompressor::DecompressAllTags_AVX2_BMI2(
+    Writer* writer) {
+  DecompressAllTagsImplStruct<DecompressIsaTier::kX86_AVX2_BMI2>::Run(this,
+                                                                      writer);
+}
+SNAPPY_UNTARGET_REGION
+#endif  // SNAPPY_IS_X86_64
+
+#if SNAPPY_IS_AARCH64
+template <class Writer>
+SNAPPY_ATTRIBUTE_NOINLINE void SnappyDecompressor::DecompressAllTags_ARM_NEON(
+    Writer* writer) {
+  DecompressAllTagsImplStruct<DecompressIsaTier::kARM_NEON>::Run(this, writer);
+}
+#endif  // SNAPPY_IS_AARCH64
+
+template <class Writer>
+void SnappyDecompressor::DecompressAllTags(Writer* writer) {
+  const uint32_t mask = internal::GetSupportedArchitectures();
+#if SNAPPY_IS_X86_64
+  if ((mask & internal::kIsaX86_AVX2Tier) == internal::kIsaX86_AVX2Tier) {
+    DecompressAllTags_AVX2_BMI2(writer);
+    return;
+  }
+  if ((mask & internal::kIsaSSSE3) != 0) {
+    DecompressAllTags_SSSE3(writer);
+    return;
+  }
+#elif SNAPPY_IS_AARCH64
+  if ((mask & internal::kIsaNEON) != 0) {
+    DecompressAllTags_ARM_NEON(writer);
+    return;
+  }
+#else
+  (void)mask;
+#endif
+  DecompressAllTags_Scalar(writer);
+}
 
 constexpr uint32_t CalculateNeeded(uint8_t tag) {
   return ((tag & 3) == 0 && tag >= (60 * 4))
@@ -2412,6 +2680,7 @@ class SnappyIOVecWriter {
     return false;
   }
 
+  template <DecompressIsaTier Tier = DecompressIsaTier::kScalar>
   inline bool AppendFromSelf(size_t offset, size_t len, char**) {
     // See SnappyArrayWriter::AppendFromSelf for an explanation of
     // the "offset - 1u" trick.
@@ -2470,9 +2739,9 @@ class SnappyIOVecWriter {
         }
         assert(to_copy > 0);
 
-        IncrementalCopy(GetIOVecPointer(from_iov, from_iov_offset),
-                        curr_iov_output_, curr_iov_output_ + to_copy,
-                        curr_iov_output_ + curr_iov_remaining_);
+        IncrementalCopyTier<Tier>(GetIOVecPointer(from_iov, from_iov_offset),
+                                  curr_iov_output_, curr_iov_output_ + to_copy,
+                                  curr_iov_output_ + curr_iov_remaining_);
         curr_iov_output_ += to_copy;
         curr_iov_remaining_ -= to_copy;
         from_iov_offset += to_copy;
@@ -2560,8 +2829,10 @@ class SnappyArrayWriter {
     }
   }
 
-  SNAPPY_ATTRIBUTE_ALWAYS_INLINE
-  inline bool AppendFromSelf(size_t offset, size_t len, char** op_p) {
+  template <DecompressIsaTier Tier = DecompressIsaTier::kScalar>
+  SNAPPY_ATTRIBUTE_ALWAYS_INLINE inline bool AppendFromSelf(size_t offset,
+                                                            size_t len,
+                                                            char** op_p) {
     assert(len > 0);
     char* const op = *op_p;
     assert(op >= base_);
@@ -2574,7 +2845,7 @@ class SnappyArrayWriter {
     if (SNAPPY_PREDICT_FALSE((kSlopBytes < 64 && len > kSlopBytes) ||
                              op >= op_limit_min_slop_ || offset < len)) {
       if (op_end > op_limit_ || offset == 0) return false;
-      *op_p = IncrementalCopy(op - offset, op, op_end, op_limit_);
+      *op_p = IncrementalCopyTier<Tier>(op - offset, op, op_end, op_limit_);
       return true;
     }
     std::memmove(op, op - offset, kSlopBytes);
@@ -2648,6 +2919,7 @@ class SnappyDecompressionValidator {
 
     return false;
   }
+  template <DecompressIsaTier Tier = DecompressIsaTier::kScalar>
   inline bool AppendFromSelf(size_t offset, size_t len, size_t* produced) {
     // See SnappyArrayWriter::AppendFromSelf for an explanation of
     // the "offset - 1u" trick.
@@ -2843,6 +3115,7 @@ class SnappyScatteredWriter {
     }
   }
 
+  template <DecompressIsaTier Tier = DecompressIsaTier::kScalar>
   inline bool AppendFromSelf(size_t offset, size_t len, char** op_p) {
     char* op = *op_p;
     assert(op >= op_base_);
@@ -2858,7 +3131,7 @@ class SnappyScatteredWriter {
         *op_p = op_ptr_;
         return res;
       }
-      *op_p = IncrementalCopy(op - offset, op, op + len, op_limit_);
+      *op_p = IncrementalCopyTier<Tier>(op - offset, op, op + len, op_limit_);
       return true;
     }
     // Fast path
