@@ -8,3 +8,6 @@ build/
 /bazel-*
 MODULE.bazel.lock
 out/
+
+# Worktrees.
+.worktrees/
