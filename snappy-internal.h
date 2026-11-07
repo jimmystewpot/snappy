@@ -33,6 +33,7 @@
 
 #include <utility>
 
+#include "snappy-isadetection.h"
 #include "snappy-stubs-internal.h"
 
 #if SNAPPY_HAVE_SSSE3
@@ -124,7 +125,6 @@ inline V128 V128_Shuffle(V128 input, V128 shuffle_mask) {
 
 inline V128 V128_DupChar(char c) { return vdupq_n_u8(c); }
 
-
 #endif
 #endif  // SNAPPY_HAVE_VECTOR_BYTE_SHUFFLE
 
@@ -151,8 +151,8 @@ class WorkingMemory {
   char* GetScratchOutput() const { return output_; }
 
  private:
-  char* mem_;        // the allocated memory, never nullptr
-  size_t size_;      // the size of the allocated memory, never 0
+  char* mem_;    // the allocated memory, never nullptr
+  size_t size_;  // the size of the allocated memory, never 0
   bool owns_mem_;
   uint16_t* table_;  // the pointer to the hashtable
   char* input_;      // the pointer to the input scratch buffer
@@ -174,11 +174,23 @@ class WorkingMemory {
 //
 // Returns an "end" pointer into "op" buffer.
 // "end - op" is the compressed size of "input".
-char* CompressFragment(const char* input,
-                       size_t input_length,
-                       char* op,
-                       uint16_t* table,
-                       const int table_size);
+#if SNAPPY_IS_X86_64
+char* CompressFragment_SSE42(const char* input, size_t input_size, char* op,
+                             uint16_t* table, const int table_size);
+char* CompressFragment_AVX2_BMI2(const char* input, size_t input_size, char* op,
+                                 uint16_t* table, const int table_size);
+#endif  // SNAPPY_IS_X86_64
+
+#if SNAPPY_IS_AARCH64
+char* CompressFragment_ARM_CRC32(const char* input, size_t input_size, char* op,
+                                 uint16_t* table, const int table_size);
+#endif  // SNAPPY_IS_AARCH64
+
+char* CompressFragment_Scalar(const char* input, size_t input_size, char* op,
+                              uint16_t* table, const int table_size);
+
+char* CompressFragment(const char* input, size_t input_length, char* op,
+                       uint16_t* table, const int table_size);
 
 // Find the largest n such that
 //
@@ -197,9 +209,10 @@ char* CompressFragment(const char* input,
 //
 // Separate implementation for 64-bit, little-endian cpus.
 // riscv and little-endian cpu choose this routinue can be done faster too.
-#if !SNAPPY_IS_BIG_ENDIAN && \
+#if !SNAPPY_IS_BIG_ENDIAN &&                                        \
     (defined(__x86_64__) || defined(_M_X64) || defined(ARCH_PPC) || \
      defined(__aarch64__) || (defined(__riscv) && (__riscv_xlen == 64)))
+SNAPPY_ATTRIBUTE_ALWAYS_INLINE
 static inline std::pair<size_t, bool> FindMatchLength(const char* s1,
                                                       const char* s2,
                                                       const char* s2_limit,
@@ -330,6 +343,7 @@ static inline std::pair<size_t, bool> FindMatchLength(const char* s1,
   return std::pair<size_t, bool>(matched, matched < 8);
 }
 #else
+SNAPPY_ATTRIBUTE_ALWAYS_INLINE
 static inline std::pair<size_t, bool> FindMatchLength(const char* s1,
                                                       const char* s2,
                                                       const char* s2_limit,
@@ -393,7 +407,8 @@ enum {
   COPY_2_BYTE_OFFSET = 2,
   COPY_4_BYTE_OFFSET = 3
 };
-static const int kMaximumTagLength = 5;  // COPY_4_BYTE_OFFSET plus the actual offset.
+static const int kMaximumTagLength =
+    5;  // COPY_4_BYTE_OFFSET plus the actual offset.
 
 // Data stored per entry in lookup table:
 //      Range   Bits-used       Description

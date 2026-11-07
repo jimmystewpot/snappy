@@ -64,15 +64,10 @@
 #define SNAPPY_TARGET_SSE42 SNAPPY_TARGET_REGION("ssse3,sse4.2")
 #define SNAPPY_TARGET_AVX2_BMI2 \
   SNAPPY_TARGET_REGION("ssse3,sse4.2,avx,avx2,bmi,bmi2")
-#else
-#define SNAPPY_TARGET_SSE42
-#define SNAPPY_TARGET_AVX2_BMI2
 #endif
 
 #if SNAPPY_IS_AARCH64
 #define SNAPPY_TARGET_ARM_CRC32 SNAPPY_TARGET_REGION("+crc")
-#else
-#define SNAPPY_TARGET_ARM_CRC32
 #endif
 
 namespace snappy {
