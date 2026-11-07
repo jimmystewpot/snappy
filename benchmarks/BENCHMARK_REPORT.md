@@ -11,7 +11,7 @@ This report evaluates runtime dynamic CPU feature dispatch performance across na
 
 ## Executive Summary
 1. **Dynamic Dispatch Overhead (Native arm64):**
-   - **Zero Regression:** Adding runtime function pointer initialization (`snappy::InitCpuFeaturesOnce()`) introduces **0.0%** runtime overhead on steady-state compression and decompression paths.
+   - **Zero Regression:** Adding runtime bitmask dispatch (`snappy::internal::GetSupportedArchitectures()` backed by `g_cached_isa_mask`) introduces **0.0%** runtime overhead on steady-state compression and decompression paths.
    - Suite geomean throughput improved across all 5 benchmark suites:
      - `BM_Flat` (compression): **+1.10%**
      - `BM_UFlat` (decompression): **+2.20%**
