@@ -38,16 +38,15 @@ def load_benchmark_entries(json_path: str) -> Dict[str, Dict[str, Any]]:
         data = json.load(f)
 
     raw_benchmarks = data.get("benchmarks", [])
-    has_aggregates = any("aggregate_name" in b for b in raw_benchmarks)
-    if has_aggregates:
-        filtered = [b for b in raw_benchmarks if b.get("aggregate_name") == "median"]
-    else:
-        filtered = raw_benchmarks
-
     result: Dict[str, Dict[str, Any]] = {}
-    for b in filtered:
+    for b in raw_benchmarks:
         key = normalize_benchmark_key(b)
-        if key:
+        if not key:
+            continue
+        agg_name = b.get("aggregate_name")
+        if agg_name == "median":
+            result[key] = b
+        elif agg_name is None and key not in result:
             result[key] = b
     return result
 

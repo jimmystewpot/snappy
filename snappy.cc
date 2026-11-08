@@ -89,7 +89,8 @@
 #if SNAPPY_IS_AARCH64
 #if defined(_MSC_VER)
 #include <intrin.h>
-#else
+#endif
+#if !defined(_MSC_VER) || defined(__clang__)
 SNAPPY_TARGET_ARM_CRC32
 #include <arm_acle.h>
 SNAPPY_UNTARGET_REGION
