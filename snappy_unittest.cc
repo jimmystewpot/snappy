@@ -1421,12 +1421,12 @@ TEST(Snappy, CpuDispatchCorruptedInputs) {
 #endif
   // 1. Copy with offset == 0
   const char kBadOffsetZero[] =
-      "\x10\x04"
+      "\x08\x0c"
       "abcd"
       "\x01\x00";
   // 2. Copy with offset > produced bytes
   const char kBadOffsetTooLarge[] =
-      "\x10\x04"
+      "\x08\x0c"
       "abcd"
       "\x01\x05";
   // 3. Truncated literal

@@ -483,7 +483,7 @@ alignas(16) constexpr std::array<std::array<char, sizeof(V128)>,
         /*pattern_sizes_minus_one=*/make_index_sequence<16>());
 
 #if SNAPPY_IS_X86_64
-SNAPPY_TARGET_REGION("ssse3")
+SNAPPY_TARGET_SSSE3
 #endif
 
 SNAPPY_ATTRIBUTE_ALWAYS_INLINE
@@ -541,7 +541,7 @@ inline uint32_t ExtractLowBytesTier<DecompressIsaTier::kScalar>(
 }
 
 #if SNAPPY_IS_X86_64
-SNAPPY_TARGET_SSE42
+SNAPPY_TARGET_SSSE3
 template <>
 inline uint32_t ExtractLowBytesTier<DecompressIsaTier::kX86_SSSE3>(
     const uint32_t& v, int n) {
@@ -585,7 +585,7 @@ template <>
 inline void MaybeZeroUpperTier<DecompressIsaTier::kScalar>() {}
 
 #if SNAPPY_IS_X86_64
-SNAPPY_TARGET_SSE42
+SNAPPY_TARGET_SSSE3
 template <>
 inline void MaybeZeroUpperTier<DecompressIsaTier::kX86_SSSE3>() {}
 SNAPPY_UNTARGET_REGION
@@ -646,7 +646,7 @@ inline void MemCopy64Tier<DecompressIsaTier::kScalar>(char* dst,
 }
 
 #if SNAPPY_IS_X86_64
-SNAPPY_TARGET_SSE42
+SNAPPY_TARGET_SSSE3
 template <>
 inline void MemCopy64Tier<DecompressIsaTier::kX86_SSSE3>(char* dst,
                                                          const void* src,
@@ -752,6 +752,9 @@ inline bool Copy64BytesWithPatternExtensionTier<DecompressIsaTier::kScalar>(
 }
 
 #if SNAPPY_HAVE_VECTOR_BYTE_SHUFFLE
+#if SNAPPY_IS_X86_64
+SNAPPY_TARGET_SSSE3
+#endif
 SNAPPY_ATTRIBUTE_ALWAYS_INLINE
 inline bool Copy64BytesWithPatternExtensionVector(char* dst, size_t offset) {
   if (SNAPPY_PREDICT_TRUE(offset <= 16)) {
@@ -793,10 +796,13 @@ inline bool Copy64BytesWithPatternExtensionVector(char* dst, size_t offset) {
   }
   return true;
 }
+#if SNAPPY_IS_X86_64
+SNAPPY_UNTARGET_REGION
+#endif
 #endif  // SNAPPY_HAVE_VECTOR_BYTE_SHUFFLE
 
 #if SNAPPY_IS_X86_64
-SNAPPY_TARGET_SSE42
+SNAPPY_TARGET_SSSE3
 template <>
 inline bool Copy64BytesWithPatternExtensionTier<DecompressIsaTier::kX86_SSSE3>(
     char* dst, size_t offset) {
@@ -892,6 +898,9 @@ inline char* IncrementalCopyTier<DecompressIsaTier::kScalar>(
 }
 
 #if SNAPPY_HAVE_VECTOR_BYTE_SHUFFLE
+#if SNAPPY_IS_X86_64
+SNAPPY_TARGET_SSSE3
+#endif
 SNAPPY_ATTRIBUTE_ALWAYS_INLINE
 inline char* IncrementalCopyVector(const char* src, char* op,
                                    char* const op_limit,
@@ -974,10 +983,13 @@ inline char* IncrementalCopyVector(const char* src, char* op,
   }
   return IncrementalCopySlow(src, op, op_limit);
 }
+#if SNAPPY_IS_X86_64
+SNAPPY_UNTARGET_REGION
+#endif
 #endif  // SNAPPY_HAVE_VECTOR_BYTE_SHUFFLE
 
 #if SNAPPY_IS_X86_64
-SNAPPY_TARGET_SSE42
+SNAPPY_TARGET_SSSE3
 template <>
 inline char* IncrementalCopyTier<DecompressIsaTier::kX86_SSSE3>(
     const char* src, char* op, char* const op_limit, char* const buf_limit) {
@@ -2160,7 +2172,7 @@ struct DecompressAllTagsImplStruct<DecompressIsaTier::kScalar> {
 };
 
 #if SNAPPY_IS_X86_64
-SNAPPY_TARGET_SSE42
+SNAPPY_TARGET_SSSE3
 template <>
 struct DecompressAllTagsImplStruct<DecompressIsaTier::kX86_SSSE3> {
   template <class Writer>
@@ -2194,6 +2206,8 @@ struct DecompressAllTagsImplStruct<DecompressIsaTier::kARM_NEON> {
 };
 #endif  // SNAPPY_IS_AARCH64
 
+#undef SNAPPY_DECOMPRESS_ALL_TAGS_BODY
+
 template <class Writer>
 SNAPPY_ATTRIBUTE_NOINLINE void SnappyDecompressor::DecompressAllTags_Scalar(
     Writer* writer) {
@@ -2201,7 +2215,7 @@ SNAPPY_ATTRIBUTE_NOINLINE void SnappyDecompressor::DecompressAllTags_Scalar(
 }
 
 #if SNAPPY_IS_X86_64
-SNAPPY_TARGET_SSE42
+SNAPPY_TARGET_SSSE3
 template <class Writer>
 SNAPPY_ATTRIBUTE_NOINLINE void SnappyDecompressor::DecompressAllTags_SSSE3(
     Writer* writer) {

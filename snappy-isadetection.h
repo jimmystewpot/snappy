@@ -31,7 +31,7 @@
 
 #include <cstdint>
 
-#if defined(__x86_64__) || defined(_M_X64)
+#if (defined(__x86_64__) || defined(_M_X64)) && !defined(_M_ARM64EC)
 #define SNAPPY_IS_X86_64 1
 #else
 #define SNAPPY_IS_X86_64 0
@@ -61,6 +61,7 @@
 #endif
 
 #if SNAPPY_IS_X86_64
+#define SNAPPY_TARGET_SSSE3 SNAPPY_TARGET_REGION("ssse3")
 #define SNAPPY_TARGET_SSE42 SNAPPY_TARGET_REGION("ssse3,sse4.2")
 #define SNAPPY_TARGET_AVX2_BMI2 \
   SNAPPY_TARGET_REGION("ssse3,sse4.2,avx,avx2,bmi,bmi2")
