@@ -115,7 +115,8 @@ namespace internal {
 
 static std::atomic<uint32_t> g_cached_isa_mask{kIsaUninitialized};
 
-uint32_t DetectSupportedArchitecturesSlow() noexcept {
+SNAPPY_ATTRIBUTE_NOINLINE uint32_t
+DetectSupportedArchitecturesSlow() noexcept {
   uint32_t val = kIsaDefault;
 #if SNAPPY_IS_X86_64
   uint32_t max_basic_leaf = 0;
@@ -189,7 +190,7 @@ uint32_t DetectSupportedArchitecturesSlow() noexcept {
 
 uint32_t GetSupportedArchitectures() noexcept {
   uint32_t mask = g_cached_isa_mask.load(std::memory_order_relaxed);
-  if ((mask & kIsaUninitialized) != 0) {
+  if (SNAPPY_PREDICT_FALSE((mask & kIsaUninitialized) != 0)) {
     return DetectSupportedArchitecturesSlow();
   }
   return mask;
@@ -384,13 +385,15 @@ size_t MaxCompressedLength(size_t source_bytes) {
 
 namespace {
 
-void UnalignedCopy64(const void* src, void* dst) {
+SNAPPY_ATTRIBUTE_ALWAYS_INLINE inline void UnalignedCopy64(const void* src,
+                                                           void* dst) {
   char tmp[8];
   std::memcpy(tmp, src, 8);
   std::memcpy(dst, tmp, 8);
 }
 
-void UnalignedCopy128(const void* src, void* dst) {
+SNAPPY_ATTRIBUTE_ALWAYS_INLINE inline void UnalignedCopy128(const void* src,
+                                                            void* dst) {
   // std::memcpy() gets vectorized when the appropriate compiler options are
   // used. For example, x86 compilers targeting SSE2+ will optimize to an SSE2
   // load and store.
@@ -400,7 +403,8 @@ void UnalignedCopy128(const void* src, void* dst) {
 }
 
 template <bool use_16bytes_chunk>
-inline void ConditionalUnalignedCopy128(const char* src, char* dst) {
+SNAPPY_ATTRIBUTE_ALWAYS_INLINE inline void ConditionalUnalignedCopy128(
+    const char* src, char* dst) {
   if (use_16bytes_chunk) {
     UnalignedCopy128(src, dst);
   } else {
@@ -487,7 +491,6 @@ alignas(16) constexpr std::array<std::array<char, sizeof(V128)>,
 SNAPPY_TARGET_SSSE3
 #endif
 
-SNAPPY_ATTRIBUTE_ALWAYS_INLINE
 static inline V128 LoadPattern(const char* src, const size_t pattern_size) {
   V128 generation_mask = V128_Load(reinterpret_cast<const V128*>(
       pattern_generation_masks[pattern_size - 1].data()));
@@ -498,7 +501,6 @@ static inline V128 LoadPattern(const char* src, const size_t pattern_size) {
                       generation_mask);
 }
 
-SNAPPY_ATTRIBUTE_ALWAYS_INLINE
 static inline std::pair<V128 /* pattern */, V128 /* reshuffle_mask */>
 LoadPatternAndReshuffleMask(const char* src, const size_t pattern_size) {
   V128 pattern = LoadPattern(src, pattern_size);
@@ -756,7 +758,6 @@ inline bool Copy64BytesWithPatternExtensionTier<DecompressIsaTier::kScalar>(
 #if SNAPPY_IS_X86_64
 SNAPPY_TARGET_SSSE3
 #endif
-SNAPPY_ATTRIBUTE_ALWAYS_INLINE
 inline bool Copy64BytesWithPatternExtensionVector(char* dst, size_t offset) {
   if (SNAPPY_PREDICT_TRUE(offset <= 16)) {
     switch (offset) {
@@ -902,7 +903,6 @@ inline char* IncrementalCopyTier<DecompressIsaTier::kScalar>(
 #if SNAPPY_IS_X86_64
 SNAPPY_TARGET_SSSE3
 #endif
-SNAPPY_ATTRIBUTE_ALWAYS_INLINE
 inline char* IncrementalCopyVector(const char* src, char* op,
                                    char* const op_limit,
                                    char* const buf_limit) {
@@ -1022,7 +1022,8 @@ inline char* IncrementalCopy(const char* src, char* op, char* const op_limit,
 }
 
 template <bool allow_fast_path>
-static inline char* EmitLiteral(char* op, const char* literal, int len) {
+SNAPPY_ATTRIBUTE_ALWAYS_INLINE static inline char* EmitLiteral(
+    char* op, const char* literal, int len) {
   // The vast majority of copies are below 16 bytes, for which a
   // call to std::memcpy() is overkill. This fast path can sometimes
   // copy up to 15 bytes too much, but that is okay in the
@@ -1075,7 +1076,8 @@ static inline char* EmitLiteral(char* op, const char* literal, int len) {
 }
 
 template <bool len_less_than_12>
-static inline char* EmitCopyAtMost64(char* op, size_t offset, size_t len) {
+SNAPPY_ATTRIBUTE_ALWAYS_INLINE static inline char* EmitCopyAtMost64(
+    char* op, size_t offset, size_t len) {
   assert(len <= 64);
   assert(len >= 4);
   assert(offset < 65536);
@@ -1104,7 +1106,9 @@ static inline char* EmitCopyAtMost64(char* op, size_t offset, size_t len) {
 }
 
 template <bool len_less_than_12>
-static inline char* EmitCopy(char* op, size_t offset, size_t len) {
+SNAPPY_ATTRIBUTE_ALWAYS_INLINE static inline char* EmitCopy(char* op,
+                                                            size_t offset,
+                                                            size_t len) {
   assert(len_less_than_12 == (len < 12));
   if (len_less_than_12) {
     return EmitCopyAtMost64</*len_less_than_12=*/true>(op, offset, len);
@@ -1390,6 +1394,9 @@ emit_remainder:
 
 #if SNAPPY_IS_X86_64
 SNAPPY_TARGET_SSE42
+#if defined(__GNUC__) && defined(__x86_64__)
+__attribute__((aligned(32)))
+#endif
 char* CompressFragment_SSE42(const char* input, size_t input_size, char* op,
                              uint16_t* table, const int table_size) {
   return CompressFragmentImpl<CompressIsaTier::kX86_SSE42>(
@@ -1398,6 +1405,9 @@ char* CompressFragment_SSE42(const char* input, size_t input_size, char* op,
 SNAPPY_UNTARGET_REGION
 
 SNAPPY_TARGET_AVX2_BMI2
+#if defined(__GNUC__) && defined(__x86_64__)
+__attribute__((aligned(32)))
+#endif
 char* CompressFragment_AVX2_BMI2(const char* input, size_t input_size, char* op,
                                  uint16_t* table, const int table_size) {
   return CompressFragmentImpl<CompressIsaTier::kX86_AVX2_BMI2>(
@@ -1416,6 +1426,9 @@ char* CompressFragment_ARM_CRC32(const char* input, size_t input_size, char* op,
 SNAPPY_UNTARGET_REGION
 #endif  // SNAPPY_IS_AARCH64
 
+#if defined(__GNUC__) && defined(__x86_64__)
+__attribute__((aligned(32)))
+#endif
 char* CompressFragment_Scalar(const char* input, size_t input_size, char* op,
                               uint16_t* table, const int table_size) {
   return CompressFragmentImpl<CompressIsaTier::kScalar>(input, input_size, op,
@@ -1426,14 +1439,14 @@ char* CompressFragment(const char* input, size_t input_size, char* op,
                        uint16_t* table, const int table_size) {
   const uint32_t mask = GetSupportedArchitectures();
 #if SNAPPY_IS_X86_64
-  if ((mask & kIsaX86_AVX2Tier) == kIsaX86_AVX2Tier) {
+  if (SNAPPY_PREDICT_TRUE((mask & kIsaX86_AVX2Tier) == kIsaX86_AVX2Tier)) {
     return CompressFragment_AVX2_BMI2(input, input_size, op, table, table_size);
   }
   if ((mask & kIsaX86_SSE42Tier) == kIsaX86_SSE42Tier) {
     return CompressFragment_SSE42(input, input_size, op, table, table_size);
   }
 #elif SNAPPY_IS_AARCH64
-  if (mask & kIsaNEON_CRC32) {
+  if (SNAPPY_PREDICT_TRUE((mask & kIsaNEON_CRC32) != 0)) {
     return CompressFragment_ARM_CRC32(input, input_size, op, table, table_size);
   }
 #endif
@@ -1684,14 +1697,15 @@ static inline bool LeftShiftOverflows(uint8_t value, uint32_t shift) {
   return (value & masks[shift]) != 0;
 }
 
-void ClearDeferred(const void** deferred_src, size_t* deferred_length,
-                   uint8_t* safe_source) {
+SNAPPY_ATTRIBUTE_ALWAYS_INLINE inline void ClearDeferred(
+    const void** deferred_src, size_t* deferred_length, uint8_t* safe_source) {
   *deferred_src = safe_source;
   *deferred_length = 0;
 }
 
-void DeferMemCopy(const void** deferred_src, size_t* deferred_length,
-                  const void* src, size_t length) {
+SNAPPY_ATTRIBUTE_ALWAYS_INLINE inline void DeferMemCopy(
+    const void** deferred_src, size_t* deferred_length, const void* src,
+    size_t length) {
   *deferred_src = src;
   *deferred_length = length;
 }
@@ -1794,7 +1808,8 @@ inline size_t AdvanceToNextTagRVOptimized(const uint8_t** ip_p, size_t* tag) {
 }
 
 // Extract the offset for copy-1 and copy-2 returns 0 for literals or copy-4.
-inline uint32_t ExtractOffset(uint32_t val, size_t tag_type) {
+SNAPPY_ATTRIBUTE_ALWAYS_INLINE inline uint32_t ExtractOffset(uint32_t val,
+                                                             size_t tag_type) {
   // For Arm non-static storage works better. For x86 static storage is better.
   // TODO: Once the array is recognized as a register, improve the
   // readability for x86.
@@ -1946,7 +1961,6 @@ DecompressBranchlessImpl(const uint8_t* ip, const uint8_t* ip_limit,
     op += deferred_length;
     ClearDeferred(&deferred_src, &deferred_length, safe_source);
   }
-  MaybeZeroUpperTier<Tier>();
   return {ip, op};
 }
 
@@ -2210,6 +2224,9 @@ struct DecompressAllTagsImplStruct<DecompressIsaTier::kARM_NEON> {
 #undef SNAPPY_DECOMPRESS_ALL_TAGS_BODY
 
 template <class Writer>
+#if defined(__GNUC__) && defined(__x86_64__)
+__attribute__((aligned(32)))
+#endif
 SNAPPY_ATTRIBUTE_NOINLINE void SnappyDecompressor::DecompressAllTags_Scalar(
     Writer* writer) {
   DecompressAllTagsImplStruct<DecompressIsaTier::kScalar>::Run(this, writer);
@@ -2218,6 +2235,9 @@ SNAPPY_ATTRIBUTE_NOINLINE void SnappyDecompressor::DecompressAllTags_Scalar(
 #if SNAPPY_IS_X86_64
 SNAPPY_TARGET_SSSE3
 template <class Writer>
+#if defined(__GNUC__) && defined(__x86_64__)
+__attribute__((aligned(32)))
+#endif
 SNAPPY_ATTRIBUTE_NOINLINE void SnappyDecompressor::DecompressAllTags_SSSE3(
     Writer* writer) {
   DecompressAllTagsImplStruct<DecompressIsaTier::kX86_SSSE3>::Run(this, writer);
@@ -2226,6 +2246,9 @@ SNAPPY_UNTARGET_REGION
 
 SNAPPY_TARGET_AVX2_BMI2
 template <class Writer>
+#if defined(__GNUC__) && defined(__x86_64__)
+__attribute__((aligned(32)))
+#endif
 SNAPPY_ATTRIBUTE_NOINLINE void SnappyDecompressor::DecompressAllTags_AVX2_BMI2(
     Writer* writer) {
   DecompressAllTagsImplStruct<DecompressIsaTier::kX86_AVX2_BMI2>::Run(this,
@@ -2246,7 +2269,8 @@ template <class Writer>
 void SnappyDecompressor::DecompressAllTags(Writer* writer) {
   const uint32_t mask = internal::GetSupportedArchitectures();
 #if SNAPPY_IS_X86_64
-  if ((mask & internal::kIsaX86_AVX2Tier) == internal::kIsaX86_AVX2Tier) {
+  if (SNAPPY_PREDICT_TRUE((mask & internal::kIsaX86_AVX2Tier) ==
+                          internal::kIsaX86_AVX2Tier)) {
     DecompressAllTags_AVX2_BMI2(writer);
     return;
   }
@@ -2255,7 +2279,7 @@ void SnappyDecompressor::DecompressAllTags(Writer* writer) {
     return;
   }
 #elif SNAPPY_IS_AARCH64
-  if ((mask & internal::kIsaNEON) != 0) {
+  if (SNAPPY_PREDICT_TRUE((mask & internal::kIsaNEON) != 0)) {
     DecompressAllTags_ARM_NEON(writer);
     return;
   }
@@ -2679,8 +2703,9 @@ class SnappyIOVecWriter {
     return true;
   }
 
-  inline bool TryFastAppend(const char* ip, size_t available, size_t len,
-                            char**) {
+  SNAPPY_ATTRIBUTE_ALWAYS_INLINE inline bool TryFastAppend(const char* ip,
+                                                           size_t available,
+                                                           size_t len, char**) {
     const size_t space_left = output_limit_ - total_written_;
     if (len <= 16 && available >= 16 + kMaximumTagLength && space_left >= 16 &&
         curr_iov_remaining_ >= 16) {
@@ -2696,7 +2721,9 @@ class SnappyIOVecWriter {
   }
 
   template <DecompressIsaTier Tier = DecompressIsaTier::kScalar>
-  inline bool AppendFromSelf(size_t offset, size_t len, char**) {
+  SNAPPY_ATTRIBUTE_ALWAYS_INLINE inline bool AppendFromSelf(size_t offset,
+                                                            size_t len,
+                                                            char**) {
     // See SnappyArrayWriter::AppendFromSelf for an explanation of
     // the "offset - 1u" trick.
     if (offset - 1u >= total_written_) {
@@ -2830,8 +2857,10 @@ class SnappyArrayWriter {
     return true;
   }
 
-  inline bool TryFastAppend(const char* ip, size_t available, size_t len,
-                            char** op_p) {
+  SNAPPY_ATTRIBUTE_ALWAYS_INLINE inline bool TryFastAppend(const char* ip,
+                                                           size_t available,
+                                                           size_t len,
+                                                           char** op_p) {
     char* op = *op_p;
     const size_t space_left = op_limit_ - op;
     if (len <= 16 && available >= 16 + kMaximumTagLength && space_left >= 16) {
@@ -2924,8 +2953,10 @@ class SnappyDecompressionValidator {
     *produced += len;
     return *produced <= expected_;
   }
-  inline bool TryFastAppend(const char* ip, size_t available, size_t length,
-                            size_t* produced) {
+  SNAPPY_ATTRIBUTE_ALWAYS_INLINE inline bool TryFastAppend(const char* ip,
+                                                           size_t available,
+                                                           size_t length,
+                                                           size_t* produced) {
     // TODO: Switch to [[maybe_unused]] when we can assume C++17.
     (void)ip;
     (void)available;
@@ -2935,7 +2966,9 @@ class SnappyDecompressionValidator {
     return false;
   }
   template <DecompressIsaTier Tier = DecompressIsaTier::kScalar>
-  inline bool AppendFromSelf(size_t offset, size_t len, size_t* produced) {
+  SNAPPY_ATTRIBUTE_ALWAYS_INLINE inline bool AppendFromSelf(size_t offset,
+                                                            size_t len,
+                                                            size_t* produced) {
     // See SnappyArrayWriter::AppendFromSelf for an explanation of
     // the "offset - 1u" trick.
     if (*produced <= offset - 1u) return false;
@@ -3115,8 +3148,10 @@ class SnappyScatteredWriter {
     }
   }
 
-  inline bool TryFastAppend(const char* ip, size_t available, size_t length,
-                            char** op_p) {
+  SNAPPY_ATTRIBUTE_ALWAYS_INLINE inline bool TryFastAppend(const char* ip,
+                                                           size_t available,
+                                                           size_t length,
+                                                           char** op_p) {
     char* op = *op_p;
     const int space_left = op_limit_ - op;
     if (length <= 16 && available >= 16 + kMaximumTagLength &&
@@ -3131,7 +3166,9 @@ class SnappyScatteredWriter {
   }
 
   template <DecompressIsaTier Tier = DecompressIsaTier::kScalar>
-  inline bool AppendFromSelf(size_t offset, size_t len, char** op_p) {
+  SNAPPY_ATTRIBUTE_ALWAYS_INLINE inline bool AppendFromSelf(size_t offset,
+                                                            size_t len,
+                                                            char** op_p) {
     char* op = *op_p;
     assert(op >= op_base_);
     // Check if we try to append from before the start of the buffer.
