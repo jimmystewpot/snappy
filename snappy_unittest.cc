@@ -1240,8 +1240,10 @@ TEST(Snappy, TestBenchmarkFiles) {
 TEST(Snappy, CpuDispatchCompressionTiers) {
   using namespace snappy::internal;
   ResetArchitectureMaskForTesting();
-  const uint32_t host_mask = GetSupportedArchitectures();
   std::vector<uint32_t> tiers = {kIsaDefault};
+#if SNAPPY_IS_X86_64 || SNAPPY_IS_AARCH64
+  const uint32_t host_mask = GetSupportedArchitectures();
+#endif
 #if SNAPPY_IS_X86_64
   if ((host_mask & kIsaX86_SSE42Tier) == kIsaX86_SSE42Tier) {
     tiers.push_back(kIsaX86_SSE42Tier);
@@ -1342,9 +1344,9 @@ TEST(Snappy, CpuDispatchSmallAndBoundaryInputs) {
 TEST(Snappy, CpuDispatchPatternExtensionOffsets) {
   using namespace snappy::internal;
   ResetArchitectureMaskForTesting();
-  const uint32_t host_mask = GetSupportedArchitectures();
   std::vector<uint32_t> tiers = {kIsaDefault};
 #if SNAPPY_IS_X86_64
+  const uint32_t host_mask = GetSupportedArchitectures();
   if (host_mask & kIsaSSSE3) tiers.push_back(kIsaSSSE3);
   if ((host_mask & kIsaX86_SSE42Tier) == kIsaX86_SSE42Tier) {
     tiers.push_back(kIsaX86_SSE42Tier);
@@ -1353,6 +1355,7 @@ TEST(Snappy, CpuDispatchPatternExtensionOffsets) {
     tiers.push_back(kIsaX86_AVX2Tier);
   }
 #elif SNAPPY_IS_AARCH64
+  const uint32_t host_mask = GetSupportedArchitectures();
   tiers.push_back(kIsaNEON);
   if (host_mask & kIsaNEON_CRC32) {
     tiers.push_back(kIsaNEON | kIsaNEON_CRC32);
@@ -1456,9 +1459,9 @@ TEST(Snappy, CpuDispatchCorruptedInputs) {
 TEST(Snappy, CpuDispatchAllTiers) {
   using namespace snappy::internal;
   ResetArchitectureMaskForTesting();
-  const uint32_t host_mask = GetSupportedArchitectures();
   std::vector<uint32_t> tiers = {kIsaDefault};
 #if SNAPPY_IS_X86_64
+  const uint32_t host_mask = GetSupportedArchitectures();
   if (host_mask & kIsaSSSE3) tiers.push_back(kIsaSSSE3);
   if ((host_mask & kIsaX86_SSE42Tier) == kIsaX86_SSE42Tier) {
     tiers.push_back(kIsaX86_SSE42Tier);
@@ -1467,6 +1470,7 @@ TEST(Snappy, CpuDispatchAllTiers) {
     tiers.push_back(kIsaX86_AVX2Tier);
   }
 #elif SNAPPY_IS_AARCH64
+  const uint32_t host_mask = GetSupportedArchitectures();
   tiers.push_back(kIsaNEON);
   if (host_mask & kIsaNEON_CRC32) {
     tiers.push_back(kIsaNEON | kIsaNEON_CRC32);
