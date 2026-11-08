@@ -122,7 +122,7 @@ inline V128 V128_Shuffle(V128 input, V128 shuffle_mask);
 inline V128 V128_DupChar(char c);
 
 #if SNAPPY_IS_X86_64
-SNAPPY_TARGET_REGION("ssse3")
+SNAPPY_TARGET_SSSE3
 inline V128 V128_Load(const V128* src) { return _mm_load_si128(src); }
 
 inline V128 V128_LoadU(const V128* src) { return _mm_loadu_si128(src); }

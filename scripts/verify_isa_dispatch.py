@@ -209,23 +209,36 @@ def check_1_x86_disassembly(
         "Verified DecompressAllTags_Scalar<SnappyArrayWriter>: zero pshufb/vpshufb/%ymm/bzhil/vzeroupper"
     )
 
-    # 6. DecompressAllTags_SSSE3<SnappyArrayWriter>
-    sig, body = find_function(funcs, "DecompressAllTags_SSSE3", "SnappyArrayWriter")
-    if not body:
-        return False, [
-            "DecompressAllTags_SSSE3<SnappyArrayWriter> symbol not found in disassembly"
-        ]
-    if not re.search(r"\bpshufb\b", body, re.IGNORECASE):
-        return False, [
-            "DecompressAllTags_SSSE3<SnappyArrayWriter> missing pshufb instruction"
-        ]
-    for banned in [r"%ymm", r"\bbzhil\b"]:
-        if re.search(banned, body, re.IGNORECASE):
+    # 6. DecompressAllTags_SSSE3<SnappyArrayWriter> & <SnappyIOVecWriter>
+    for writer_type in ["SnappyArrayWriter", "SnappyIOVecWriter"]:
+        sig, body = find_function(funcs, "DecompressAllTags_SSSE3", writer_type)
+        if not body or not body.strip():
             return False, [
-                f"DecompressAllTags_SSSE3<SnappyArrayWriter> contains banned instruction {banned}"
+                f"DecompressAllTags_SSSE3<{writer_type}> symbol not found in disassembly"
             ]
+        if writer_type == "SnappyArrayWriter" and not re.search(
+            r"\bpshufb\b", body, re.IGNORECASE
+        ):
+            return False, [
+                f"DecompressAllTags_SSSE3<{writer_type}> missing pshufb instruction"
+            ]
+        for banned in [
+            r"%ymm",
+            r"\bbzhil\b",
+            r"\bcrc32",
+            r"\bpinsr[bdq]\b",
+            r"\bpblend",
+            r"\bpmovzx",
+            r"\bpmovsx",
+            r"\bpcmpgtq\b",
+            r"\bptest\b",
+        ]:
+            if re.search(banned, body, re.IGNORECASE):
+                return False, [
+                    f"DecompressAllTags_SSSE3<{writer_type}> contains banned SSE4.1/SSE4.2/AVX2 instruction {banned}"
+                ]
     logs.append(
-        "Verified DecompressAllTags_SSSE3<SnappyArrayWriter>: contains pshufb, zero %ymm/bzhil"
+        "Verified DecompressAllTags_SSSE3<SnappyArrayWriter & SnappyIOVecWriter>: contains pshufb, zero SSE4.1/SSE4.2/%ymm/bzhil"
     )
 
     # 7. DecompressAllTags_AVX2_BMI2<SnappyArrayWriter>
@@ -429,7 +442,10 @@ def check_5_asan_ubsan_build_and_test(
 ) -> Tuple[bool, List[str]]:
     """Check 5: AddressSanitizer + UndefinedBehaviorSanitizer build and test execution."""
     logs: List[str] = []
-    san_flags = "-fsanitize=address,undefined -fno-omit-frame-pointer"
+    san_flags = (
+        "-fsanitize=address,undefined -fno-sanitize-recover=all "
+        "-fno-omit-frame-pointer"
+    )
     cmake_cmd = [
         "cmake",
         "-B",
@@ -448,8 +464,10 @@ def check_5_asan_ubsan_build_and_test(
     if res.returncode != 0:
         return False, ["CMake build failed for snappy_unittest under ASan/UBSan"]
 
+    test_env = os.environ.copy()
+    test_env["UBSAN_OPTIONS"] = "halt_on_error=1:print_stacktrace=1"
     test_cmd = ["ctest", "--test-dir", str(build_dir), "--output-on-failure"]
-    test_res = run_command(test_cmd, cwd=repo_root, verbose=verbose)
+    test_res = run_command(test_cmd, cwd=repo_root, verbose=verbose, env=test_env)
     if test_res.returncode != 0:
         return False, [
             f"ctest execution failed under ASan/UBSan:\n{test_res.stdout}\n{test_res.stderr}"

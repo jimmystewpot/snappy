@@ -11,15 +11,28 @@ present in the baseline (before) are missing in the comparison (after).
 import argparse
 import json
 import math
+import re
 import sys
 from typing import Any, Callable, Dict, List, Tuple
+
+
+_AGGREGATE_SUFFIX_RE = re.compile(r"_(median|mean|stddev|cv)$")
+
+
+def normalize_benchmark_key(entry: Dict[str, Any]) -> str:
+    """Normalize a benchmark entry key using run_name with aggregate-suffix fallback."""
+    run_name = entry.get("run_name", "")
+    if run_name:
+        return str(run_name)
+    name = str(entry.get("name", ""))
+    return _AGGREGATE_SUFFIX_RE.sub("", name)
 
 
 def load_benchmark_entries(json_path: str) -> Dict[str, Dict[str, Any]]:
     """Load benchmarks from a Google Benchmark JSON file.
 
     Extracts aggregate_name == 'median' if aggregates are present,
-    otherwise all single-run entries.
+    otherwise all single-run entries, keyed by normalized benchmark name.
     """
     with open(json_path, "r", encoding="utf-8") as f:
         data = json.load(f)
@@ -33,9 +46,9 @@ def load_benchmark_entries(json_path: str) -> Dict[str, Dict[str, Any]]:
 
     result: Dict[str, Dict[str, Any]] = {}
     for b in filtered:
-        name = b.get("name", "")
-        if name:
-            result[name] = b
+        key = normalize_benchmark_key(b)
+        if key:
+            result[key] = b
     return result
 
 
@@ -93,16 +106,20 @@ def compare_benchmarks(
     for name in common_names:
         b_before = before_entries[name]
         b_after = after_entries[name]
+        display_name = b_after.get("name") or b_before.get("name") or name
         before_mb = get_throughput_mb_s(b_before)
         after_mb = get_throughput_mb_s(b_after)
+
+        if before_mb <= 0 or after_mb <= 0:
+            has_error = True
 
         if before_mb > 0:
             ratio = after_mb / before_mb
             delta_pct = (ratio - 1.0) * 100.0
             benchmark_deltas[name] = (before_mb, after_mb, delta_pct)
-            print(f"| {name} | {before_mb:.2f} | {after_mb:.2f} | {delta_pct:+.2f}% |")
+            print(f"| {display_name} | {before_mb:.2f} | {after_mb:.2f} | {delta_pct:+.2f}% |")
         else:
-            print(f"| {name} | {before_mb:.2f} | {after_mb:.2f} | N/A |")
+            print(f"| {display_name} | {before_mb:.2f} | {after_mb:.2f} | N/A |")
 
     print("\n### Suite Geomean Summary\n")
     print("| Suite | Before (MB/s) | After (MB/s) | Delta (%) | Status |")
