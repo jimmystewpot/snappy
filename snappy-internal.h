@@ -123,25 +123,17 @@ inline V128 V128_DupChar(char c);
 
 #if SNAPPY_IS_X86_64
 SNAPPY_TARGET_SSSE3
-inline V128 V128_Load(const V128* src) {
-  return _mm_load_si128(src);
-}
+inline V128 V128_Load(const V128* src) { return _mm_load_si128(src); }
 
-inline V128 V128_LoadU(const V128* src) {
-  return _mm_loadu_si128(src);
-}
+inline V128 V128_LoadU(const V128* src) { return _mm_loadu_si128(src); }
 
-inline void V128_StoreU(V128* dst, V128 val) {
-  _mm_storeu_si128(dst, val);
-}
+inline void V128_StoreU(V128* dst, V128 val) { _mm_storeu_si128(dst, val); }
 
 inline V128 V128_Shuffle(V128 input, V128 shuffle_mask) {
   return _mm_shuffle_epi8(input, shuffle_mask);
 }
 
-inline V128 V128_DupChar(char c) {
-  return _mm_set1_epi8(c);
-}
+inline V128 V128_DupChar(char c) { return _mm_set1_epi8(c); }
 SNAPPY_UNTARGET_REGION
 
 #elif SNAPPY_HAVE_SSSE3
