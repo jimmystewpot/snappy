@@ -98,11 +98,51 @@ def find_function(
     return None, None
 
 
+def resolve_llvm_objdump() -> Optional[str]:
+    """Return path to an LLVM-backed objdump binary, or None if unavailable."""
+    candidates: List[str] = []
+    for name in ("llvm-objdump", "/usr/bin/objdump", "objdump"):
+        resolved = name if name.startswith("/") else shutil.which(name)
+        if resolved and Path(resolved).is_file() and resolved not in candidates:
+            candidates.append(resolved)
+
+    xcrun_bin = shutil.which("xcrun")
+    if xcrun_bin:
+        for tool in ("llvm-objdump", "objdump"):
+            proc = subprocess.run(
+                [xcrun_bin, "--find", tool],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            found = proc.stdout.strip()
+            if proc.returncode == 0 and found and found not in candidates:
+                candidates.append(found)
+
+    for candidate in candidates:
+        proc = subprocess.run(
+            [candidate, "--version"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        version_text = f"{proc.stdout}\n{proc.stderr}".lower()
+        if proc.returncode == 0 and "llvm" in version_text:
+            return candidate
+    return None
+
+
 def check_1_x86_disassembly(
     repo_root: Path, build_dir: Path, verbose: bool
 ) -> Tuple[bool, List[str]]:
     """Check 1: x86_64 cross-compiled disassembly audit on snappy.cc.o."""
     logs: List[str] = []
+    objdump_bin = resolve_llvm_objdump()
+    if not objdump_bin:
+        return False, [
+            "LLVM objdump (llvm-objdump or Apple /usr/bin/objdump) is required for Check 1"
+        ]
+
     cmake_cmd = [
         "cmake",
         "-B",
@@ -125,7 +165,6 @@ def check_1_x86_disassembly(
     if not obj_file.is_file():
         return False, [f"Object file {obj_file} not found"]
 
-    objdump_bin = shutil.which("objdump") or shutil.which("llvm-objdump") or "objdump"
     disasm_res = run_command(
         [objdump_bin, "-d", "-C", "--arch=x86_64", str(obj_file)],
         cwd=repo_root,
@@ -279,6 +318,12 @@ def check_2_arm64_disassembly(
 ) -> Tuple[bool, List[str]]:
     """Check 2: arm64 -march=armv8-a+nocrc disassembly audit on snappy.cc.o."""
     logs: List[str] = []
+    objdump_bin = resolve_llvm_objdump()
+    if not objdump_bin:
+        return False, [
+            "LLVM objdump (llvm-objdump or Apple /usr/bin/objdump) is required for Check 2"
+        ]
+
     cmake_cmd = [
         "cmake",
         "-B",
@@ -301,7 +346,6 @@ def check_2_arm64_disassembly(
     if not obj_file.is_file():
         return False, [f"Object file {obj_file} not found"]
 
-    objdump_bin = shutil.which("objdump") or shutil.which("llvm-objdump") or "objdump"
     disasm_res = run_command(
         [objdump_bin, "-d", "-C", "--arch=arm64", str(obj_file)],
         cwd=repo_root,

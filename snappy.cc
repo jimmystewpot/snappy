@@ -115,8 +115,7 @@ namespace internal {
 
 static std::atomic<uint32_t> g_cached_isa_mask{kIsaUninitialized};
 
-SNAPPY_ATTRIBUTE_NOINLINE uint32_t
-DetectSupportedArchitecturesSlow() noexcept {
+SNAPPY_ATTRIBUTE_NOINLINE uint32_t DetectSupportedArchitecturesSlow() noexcept {
   uint32_t val = kIsaDefault;
 #if SNAPPY_IS_X86_64
   uint32_t max_basic_leaf = 0;
@@ -1437,8 +1436,8 @@ char* CompressFragment_Scalar(const char* input, size_t input_size, char* op,
 
 char* CompressFragment(const char* input, size_t input_size, char* op,
                        uint16_t* table, const int table_size) {
-  const uint32_t mask = GetSupportedArchitectures();
 #if SNAPPY_IS_X86_64
+  const uint32_t mask = GetSupportedArchitectures();
   if (SNAPPY_PREDICT_TRUE((mask & kIsaX86_AVX2Tier) == kIsaX86_AVX2Tier)) {
     return CompressFragment_AVX2_BMI2(input, input_size, op, table, table_size);
   }
@@ -1446,6 +1445,7 @@ char* CompressFragment(const char* input, size_t input_size, char* op,
     return CompressFragment_SSE42(input, input_size, op, table, table_size);
   }
 #elif SNAPPY_IS_AARCH64
+  const uint32_t mask = GetSupportedArchitectures();
   if (SNAPPY_PREDICT_TRUE((mask & kIsaNEON_CRC32) != 0)) {
     return CompressFragment_ARM_CRC32(input, input_size, op, table, table_size);
   }
@@ -2267,8 +2267,8 @@ SNAPPY_ATTRIBUTE_NOINLINE void SnappyDecompressor::DecompressAllTags_ARM_NEON(
 
 template <class Writer>
 void SnappyDecompressor::DecompressAllTags(Writer* writer) {
-  const uint32_t mask = internal::GetSupportedArchitectures();
 #if SNAPPY_IS_X86_64
+  const uint32_t mask = internal::GetSupportedArchitectures();
   if (SNAPPY_PREDICT_TRUE((mask & internal::kIsaX86_AVX2Tier) ==
                           internal::kIsaX86_AVX2Tier)) {
     DecompressAllTags_AVX2_BMI2(writer);
@@ -2279,12 +2279,11 @@ void SnappyDecompressor::DecompressAllTags(Writer* writer) {
     return;
   }
 #elif SNAPPY_IS_AARCH64
+  const uint32_t mask = internal::GetSupportedArchitectures();
   if (SNAPPY_PREDICT_TRUE((mask & internal::kIsaNEON) != 0)) {
     DecompressAllTags_ARM_NEON(writer);
     return;
   }
-#else
-  (void)mask;
 #endif
   DecompressAllTags_Scalar(writer);
 }
